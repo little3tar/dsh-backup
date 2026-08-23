@@ -68,11 +68,11 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   - 源码未提交改动：`git diff` 导出为 `patches/<repo>-<日期>.patch`（或列出改动清单）。
   - 运行层修改：把被改的文件复制到 `patches/run/` 下（保留原路径结构），并在 MANIFEST 记录「官方应含什么、本地改成了什么」。
   - 插件包内修改：把被改文件复制到 `patches/node_modules/<包名>/<相对路径>`，MANIFEST 记录包名、版本、官方与本地差异；恢复时先确认目标同版本，再重应用。
-- 生成 **MANIFEST.md**（见下），写入 staging 根。**MANIFEST 以实际复制进 staging 的内容为准**：打包前核对每类实际文件清单；检测到但复制时已消失（源目录被删等）的项，在 MANIFEST 标注「检测时存在、打包时已消失」，不得虚报已包含。
+- 生成 **MANIFEST.md**（见下），写入 staging 根。**MANIFEST 以实际复制进 staging 的内容为准**：打包前核对每类实际文件清单；检测到但复制时已消失（源目录被删等）的项，在 MANIFEST 标注「检测时存在、打包时已消失」，不得虚报已包含。**MANIFEST 必须完整填写下方模板**：含分平台 Node 安装的完整命令（如 `winget install OpenJS.NodeJS.LTS`）、具体代理命令（如 `pnpm config set proxy http://<代理>`）、镜像地址，**不得简写**（如只写「winget/brew/apt」这类省略形式），确保恢复 agent 逐字可执行。
 - 打包 ZIP（`Compress-Archive` / `zip -r`），包名 `dsh-backup-<YYYYMMDD>-<HHMM>.zip`。
 - 保存位置：按通用提问规范征求，**选项三个**：「使用默认位置（当前工作空间）/ WebDAV / 自定义路径」。选项文案不要写任何具体目录名（各环境不同）。
   - 选「自定义路径」：提示用户直接输入完整路径，agent 按其输入执行，不得自行假定。
-  - 选「WebDAV」：**追加一个提问环节**——询问 WebDAV 地址（完整 URL，含目标目录路径）与凭据（用户名/密码或令牌）。**同时在默认位置（当前工作空间）保留一份本地副本**（双输出：本地 + WebDAV，WebDAV 失败时本地仍可用）；选项说明中需向用户提示「选 WebDAV 会在默认位置同时保存一份」。上传：`curl -u <用户>:<密码> -T <文件> <WebDAV地址>/<包名>`（或 PowerShell `Invoke-WebRequest -Method Put`）；上传后校验远端存在与大小（`curl -I` / HEAD）。凭据只用于本次上传，**不得写入 MANIFEST 或任何备份文件**。
+  - 选「WebDAV」：**追加一个提问环节**——询问 WebDAV 地址（完整 URL，含目标根路径）与凭据（用户名/密码或令牌）。**同时在默认位置（当前工作空间）保留一份本地副本**（双输出：本地 + WebDAV，WebDAV 失败时本地仍可用）；选项说明中需向用户提示「选 WebDAV 会在默认位置同时保存一份」。上传流程：**先用 MKCOL 创建 `dsh-backup/` 子目录**（`curl -X MKCOL -u <用户>:<密码> <WebDAV根地址>/dsh-backup`；已存在则忽略 405/301 错误），再 `curl -u <用户>:<密码> -T <文件> <WebDAV根地址>/dsh-backup/<包名>`（或 PowerShell `Invoke-WebRequest -Method Put` 到该路径）；上传后校验远端存在与大小（`curl -I` / HEAD）。凭据只用于本次上传，**不得写入 MANIFEST 或任何备份文件**。
 - 校验：条目数、总大小、SHA256。
 
 ### 4. MANIFEST.md（按六类记录，自包含）
