@@ -4,7 +4,7 @@ description: >
   备份与恢复 DeepSeek Harness (DSH) 环境。把环境视为六类组件的集合
   （配置 / 插件 / 本地依赖 / 环境补丁 / 自定义脚本 / 数据），按类别检测、选择、打包、对比、恢复。
   生成跨平台通用、自带 MANIFEST 解释与恢复指导的 ZIP，支持在无 DSH 的新环境按指导安装与恢复。
-  当用户说「备份 DSH / 备份配置」、「恢复 DSH / 恢复配置 / 还原环境」、「迁移 DSH / 复刻环境 / 换机器」时激活。
+  当用户说「备份 DSH / 备份配置」、「恢复 DSH / 恢复配置 / 还原环境」、「迁移 DSH / 复刻环境 / 换机器」，或用户提供 dsh-backup-*.zip 备份包文件引用时激活。
 ---
 
 # DSH 环境备份与恢复
@@ -73,6 +73,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   - **bundles 字段**：如实记录「有/无 + 完整列表」。以读 `profiles/web/package.json` 的 `dsh.profile.bundles` 为准，不得凭印象写「无 bundles」。
   - **脚本绝对路径**：对每个纳入的脚本 grep 硬编码绝对路径（Windows 搜 `C:/Users/`、`C:\Users\`；macOS/Linux 搜 `/Users/`、`/home/`）。有则记录**具体文件与位置**（如「openrouter-proxy.cjs 候选路径 2/3 硬编码 `C:/Users/<用户>/AppData/Roaming/npm/...`，恢复时同目录 `npm install https-proxy-agent` 兜底」）；用 `%~dp0`/`$(dirname)` 等相对路径的如实写「无绝对路径，无需改写」。不得笼统写「内部含绝对路径」。
   - **二进制来源**：插件状态目录中的二进制（如 `dsh-pocket/bin/cloudflared.exe`），查证是「npm 包内自带（`pnpm install` 可重装）」还是「运行时下载（首次使用自动拉取，恢复后需联网或手动放置）」——查法：读已安装包目录（`profiles/web/node_modules/<包>/`）是否含该文件。**不得**写「可由 pnpm install 重装」除非确认包内自带。
+  - **file: 依赖的 lock 解析一致性**：对每个 `file:` 依赖，读 `pnpm-lock.yaml` 中该依赖的 `version:`/`resolution.directory` 路径，与 package.json 的 specifier 对比。junction/symlink 场景（如 repo 是指向 fork 的链接）下 lock 会记录**链接真实目标**（fork），与 specifier（repo）不一致——此时在 MANIFEST 记录「lock 中该依赖解析为 <真实目标>，与 specifier 不一致（符号链接场景）；恢复时 `pnpm install` 会按 lock 解析到该路径，若与包内 local-deps 不符，需修正 lock 中 N 处路径后重装」，并在恢复验证清单核对实际解析路径。
   对账方法示例（PowerShell）：解压 ZIP 到临时目录后，与 staging、与来源环境对应文件逐文件 `Get-FileHash` 对比，确认零差异；`git status` 确认仓库干净。
 - 打包 ZIP（`Compress-Archive` / `zip -r`），包名 `dsh-backup-<YYYYMMDD>-<HHMM>.zip`。
 - 保存位置：按通用提问规范征求，**选项三个**：「使用默认位置（当前工作空间）/ WebDAV / 自定义路径」。选项文案不要写任何具体目录名（各环境不同）。
@@ -99,19 +100,21 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 - 恢复步骤（任何 agent / 任何机器）：
   1. 全新环境引导（见下「全新环境引导」；已有环境则跳过 Node/pnpm/DSH 安装）
   2. 解压本包到目标 $DSH_HOME（或按清单放置）
-  3. 重装插件：cd profiles/web && pnpm install（构建脚本被拦截则 pnpm approve-builds --all；GitHub/npm 源不可达时按「网络与代理处理」配置后再装）
+  3. 重装插件：cd profiles/web && pnpm install（构建脚本被拦截则 pnpm approve-builds --all；GitHub/npm 源不可达时按「网络与代理处理」配置后再装）。**自引用式 file: 依赖（指向 node_modules 内的，如 dsh-web-scroll-fix）必须先放置再执行本步**；外部目录 file: 依赖（如 pet-remielle repo）也建议先放置。若目标机器正在运行 dsh web GUI 且插件含 Electron/vendor 二进制，pnpm 替换插件目录会因文件被进程映射报 ERR_PNPM_EPERM——先停止 GUI 或切换网页模式再装
   4. 本地依赖：按清单放置，必要时改 file: 路径
   5. 环境补丁：按 patches/ 说明重新应用——运行层：把 patches/run/index.html 中的内联 `<style>…</style>` 注入目标 index.html 的 `<head>`（或直接替换该文件）；插件包内：确认目标安装同版本后，把 patches/node_modules/<包>/<路径> 覆盖到对应位置。官方升级会覆盖，需保留本清单重应用
   6. 插件状态：按清单恢复（如 dsh-pocket 的 token/settings.json）
   7. 环境适配：路径重写（绝对路径替换为当前用户）；代理脚本依赖适配；本地代理（如 sing-box）说明
   8. 凭据说明（若含）；启动 dsh web
 - 恢复完成验证清单：
-  - `dsh --version` 与来源版本一致
+  - `dsh --version` 与来源版本一致（或按用户决策的现有版本）
   - 插件在位（`pnpm list` 或 node_modules 确认，含本地依赖）
+  - **file: 依赖实际解析路径与 MANIFEST 记录一致**（`pnpm list` 输出中 `dsh-pet-remielle@file:...` 等路径正确，未被 lock 旧路径带偏）
   - 补丁在位：目标 index.html 含内联 style；proxy.mjs 等与 patches/ 一致
   - 插件状态已放置（如 dsh-pocket token）
   - 运行时二进制就位（如 dsh-pocket 的 cloudflared.exe 已存在，或首次使用时自动下载成功）
   - `dsh web` 启动、GUI 可访问；异常则重启并硬刷新浏览器（Ctrl+Shift+R）
+  - **恢复前创建的旧会话可能看不到新插件工具（会话投影缓存旧）**——新建会话或硬刷新后生效，属正常现象，不必重装
 - 全新环境引导（目标机器无 Node / 无 DSH 时）：
   - 检测顺序：node --version → dsh --version → pnpm（corepack pnpm --version）
   - 安装 Node：Windows 用 winget install OpenJS.NodeJS.LTS 或官网安装包；macOS 用 brew install node；Linux 用 apt/apt-get install nodejs npm（或 nvm）。目标 Node >= 22.19（node:zlib 的 zstd 需要）
@@ -132,9 +135,10 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 ### 1. 目标环境检测
 
 - 检测链：`node --version` → `dsh --version` → `corepack pnpm --version`。
+- 已有环境 `dsh --version` 与 MANIFEST 来源版本不一致时：向用户提问是否升级（升级可能影响现有配置、需重装插件）或按现有版本继续（部分插件可能不兼容）。
 - 全新机器（无 Node）：按 MANIFEST「全新环境引导」安装 Node → pnpm → DSH（按来源版本）；每步验证版本；npm/GitHub 不可达时按「网络与代理处理」配置。
 - `$DSH_HOME` 状态：全新 / 已有配置。
-- 读取备份包 MANIFEST.md 与包内内容。
+- 读取备份包 MANIFEST.md 与包内内容；解压到**固定绝对路径**（建议目标机器上的独立目录，勿用 `$env:TEMP`——不同权限下其解析值不同，权限切换后路径失联）。
 
 ### 2. 对比与取舍（按六类逐项提问；同「通用操作规范」的通用提问语义）
 
@@ -148,7 +152,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 
 ### 3. 恢复执行
 
-按用户选择逐一执行：全新环境引导（若需）→ 路径/环境适配 → 放置文件 → 重装插件（pnpm install + approve-builds）→ 本地依赖 → 补丁应用 → 插件状态恢复 → 脚本适配 → 凭据（若含且确认）。每完成一项汇报。
+按用户选择逐一执行：全新环境引导（若需）→ 路径/环境适配 → 放置文件（**自引用式 file: 本地依赖如 dsh-web-scroll-fix 必须在本步先放置**）→ 重装插件（pnpm install + approve-builds；**若目标机器正运行 dsh web GUI 且插件含 Electron/vendor 二进制，pnpm 会因文件被进程映射报 ERR_PNPM_EPERM——先停 GUI 或切换网页模式再装**）→ 其余本地依赖 → 补丁应用 → 插件状态恢复 → 脚本适配 → 凭据（若含且确认）。每完成一项汇报。
 
 ### 4. 验证
 
@@ -162,6 +166,9 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 - 环境补丁被官方升级覆盖（第 4 类）——补丁记录要保留、恢复后重应用。
 - 凭据丢失（第 1 类）——默认不打包，需用户显式选择。
 - 代理脚本依赖绝对路径（第 5 类）——新环境需单独安装依赖或改 require。
+- **pnpm install 报 ERR_PNPM_EPERM（重命名/删除插件目录失败）**——插件含 Electron/vendor 二进制且 dsh web GUI 正在运行（进程映射文件）；先停 GUI 或切网页模式再装。
+- **file: 依赖被 pnpm-lock.yaml 旧路径带偏**——符号链接场景下 lock 记录链接真实目标，与 package.json specifier 不一致；恢复后核对 `pnpm list` 实际解析路径，必要时修正 lock。
+- **恢复前创建的旧会话看不到新插件工具**——会话投影缓存旧，新建会话或硬刷新（Ctrl+Shift+R）后生效，不是安装失败。
 - **MANIFEST 与内容失实**（任何类别）——恢复 agent 只信 MANIFEST 会误判（如把「无 bundles」当真而漏配插件激活、把「无绝对路径」当真而不改路径、把「可 pnpm 重装」当真而漏放二进制）。生成时必须按「打包后对账」逐条核对。
 - 插件状态中的运行时下载二进制（如 cloudflared.exe）未就位（第 5 类）——`pnpm install` 不会重装它；恢复后需联网自动下载或手动放置，网络受限时功能不可用。
 - 全新机器安装链断裂（无 Node / npm/GitHub 源不可达）——按「全新环境引导」与「网络与代理处理」逐步验证，每步确认后再继续。
