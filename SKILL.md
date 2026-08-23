@@ -19,7 +19,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 | 2 | **插件** | `profiles/web/package.json`（依赖 + bundles）、`pnpm-lock.yaml` | 读 package.json |
 | 3 | **本地依赖** | `package.json` 中 `file:`/`link:` 指向的源码目录（如 pet-remielle） | 解析依赖声明并检查路径存在 |
 | 4 | **环境补丁** | 对 DSH 及已安装组件的自定义修改，三种形态：① 本地源码目录未提交改动（git status/diff）；② 运行部署层被改文件（全局 `node_modules\@deepseek-ai\dsh` 下 index.html 内联 style、dist CSS/JS 与官方不一致）；③ **已安装插件包内文件被改**（如 `profiles/web/node_modules/dsh-pocket/lib/proxy.mjs` 与官方 tarball 不一致） | ① git 检测；② 对比官方/查内联注入；③ 对候选包 `npm pack <pkg>@<版本>` 下载官方 tarball，解压后与本地文件逐一对比 hash，不一致即补丁。**粒度**：默认只对比用户提及/可疑的包；「全量对比」则遍历 `package.json` 全部依赖逐一对比（需联网，耗时较长） |
-| 5 | **自定义脚本、目录与插件状态** | `$DSH_HOME` 下非标准文件与目录（如 `openrouter-proxy.cjs/.cmd`、`debug/`），以及**插件运行时数据目录**（如 `dsh-pocket/` 下的 `token`、`token-lan`、`settings.json` 等登录/密码状态） | 扫描 `$DSH_HOME` 顶层非标准命名（非 `sessions/storages/synapse/profiles/skills/attachments` 等标准项即视为自定义）；对已知插件状态目录（`dsh-pocket` 等）单独列出并询问是否纳入 |
+| 5 | **自定义脚本、目录与插件状态** | `$DSH_HOME` 下非标准文件与目录（如 `openrouter-proxy.cjs/.cmd`、`debug/`），以及**插件运行时数据目录**（如 `dsh-pocket/` 下的 `token`、`token-lan`、`settings.json` 等登录/密码状态，`bin/` 内**运行时下载的二进制**如 `cloudflared.exe`） | 扫描 `$DSH_HOME` 顶层非标准命名（非 `sessions/storages/synapse/profiles/skills/attachments` 等标准项即视为自定义）；对已知插件状态目录（`dsh-pocket` 等）单独列出并询问是否纳入；状态目录中的二进制需**查证来源**（npm 包内自带 / 运行时下载）并如实记录 |
 | 6 | **数据** | `sessions/`、`storages/`、`synapse/`、`attachments/` | 统计体积 |
 
 ## 通用操作规范（两种模式都必须遵守）
@@ -69,11 +69,16 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   - 运行层修改：把被改的文件复制到 `patches/run/` 下（保留原路径结构），并在 MANIFEST 记录「官方应含什么、本地改成了什么」。
   - 插件包内修改：把被改文件复制到 `patches/node_modules/<包名>/<相对路径>`，MANIFEST 记录包名、版本、官方与本地差异；恢复时先确认目标同版本，再重应用。
 - 生成 **MANIFEST.md**（见下），写入 staging 根。**MANIFEST 以实际复制进 staging 的内容为准**：打包前核对每类实际文件清单；检测到但复制时已消失（源目录被删等）的项，在 MANIFEST 标注「检测时存在、打包时已消失」，不得虚报已包含。**MANIFEST 必须完整填写下方模板**：含分平台 Node 安装的完整命令（如 `winget install OpenJS.NodeJS.LTS`）、具体代理命令（如 `pnpm config set proxy http://<代理>`）、镜像地址，**不得简写**（如只写「winget/brew/apt」这类省略形式），确保恢复 agent 逐字可执行。
+- **打包后对账（防 MANIFEST 失实，必做）**：写入 MANIFEST 后，必须把「MANIFEST 描述」与「staging 实际内容 + 来源环境」三方核对一遍，重点核查三个高发失实点：
+  - **bundles 字段**：如实记录「有/无 + 完整列表」。以读 `profiles/web/package.json` 的 `dsh.profile.bundles` 为准，不得凭印象写「无 bundles」。
+  - **脚本绝对路径**：对每个纳入的脚本 grep 硬编码绝对路径（Windows 搜 `C:/Users/`、`C:\Users\`；macOS/Linux 搜 `/Users/`、`/home/`）。有则记录**具体文件与位置**（如「openrouter-proxy.cjs 候选路径 2/3 硬编码 `C:/Users/<用户>/AppData/Roaming/npm/...`，恢复时同目录 `npm install https-proxy-agent` 兜底」）；用 `%~dp0`/`$(dirname)` 等相对路径的如实写「无绝对路径，无需改写」。不得笼统写「内部含绝对路径」。
+  - **二进制来源**：插件状态目录中的二进制（如 `dsh-pocket/bin/cloudflared.exe`），查证是「npm 包内自带（`pnpm install` 可重装）」还是「运行时下载（首次使用自动拉取，恢复后需联网或手动放置）」——查法：读已安装包目录（`profiles/web/node_modules/<包>/`）是否含该文件。**不得**写「可由 pnpm install 重装」除非确认包内自带。
+  对账方法示例（PowerShell）：解压 ZIP 到临时目录后，与 staging、与来源环境对应文件逐文件 `Get-FileHash` 对比，确认零差异；`git status` 确认仓库干净。
 - 打包 ZIP（`Compress-Archive` / `zip -r`），包名 `dsh-backup-<YYYYMMDD>-<HHMM>.zip`。
 - 保存位置：按通用提问规范征求，**选项三个**：「使用默认位置（当前工作空间）/ WebDAV / 自定义路径」。选项文案不要写任何具体目录名（各环境不同）。
   - 选「自定义路径」：提示用户直接输入完整路径，agent 按其输入执行，不得自行假定。
   - 选「WebDAV」：**追加一个提问环节**——询问 WebDAV 地址（完整 URL，含目标根路径）与凭据（用户名/密码或令牌）。**同时在默认位置（当前工作空间）保留一份本地副本**（双输出：本地 + WebDAV，WebDAV 失败时本地仍可用）；选项说明中需向用户提示「选 WebDAV 会在默认位置同时保存一份」。上传流程：**先用 MKCOL 创建 `dsh-backup/` 子目录**（`curl -X MKCOL -u <用户>:<密码> <WebDAV根地址>/dsh-backup`；已存在则忽略 405/301 错误），再 `curl -u <用户>:<密码> -T <文件> <WebDAV根地址>/dsh-backup/<包名>`（或 PowerShell `Invoke-WebRequest -Method Put` 到该路径）；上传后校验远端存在与大小（`curl -I` / HEAD）。凭据只用于本次上传，**不得写入 MANIFEST 或任何备份文件**。
-- 校验：条目数、总大小、SHA256。
+- 校验：条目数、总大小、SHA256；并按「打包后对账」把关键文件（settings.yaml、package.json、pnpm-lock.yaml、patches/、scripts/、state/ 等）的 hash 与来源环境逐一比对，确认一致后才交付。
 
 ### 4. MANIFEST.md（按六类记录，自包含）
 
@@ -105,6 +110,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   - 插件在位（`pnpm list` 或 node_modules 确认，含本地依赖）
   - 补丁在位：目标 index.html 含内联 style；proxy.mjs 等与 patches/ 一致
   - 插件状态已放置（如 dsh-pocket token）
+  - 运行时二进制就位（如 dsh-pocket 的 cloudflared.exe 已存在，或首次使用时自动下载成功）
   - `dsh web` 启动、GUI 可访问；异常则重启并硬刷新浏览器（Ctrl+Shift+R）
 - 全新环境引导（目标机器无 Node / 无 DSH 时）：
   - 检测顺序：node --version → dsh --version → pnpm（corepack pnpm --version）
@@ -136,7 +142,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 - 2 插件差异：目标已装 vs 包内（多/少/版本）→ 说明并让用户决定是否对齐。
 - 3 本地依赖：目标缺失 → 放置或改路径。
 - 4 环境补丁：目标是否有相同修改（检测方法同备份，粒度与备份时一致：单包或全量对比）→ 已有则跳过/覆盖；没有则应用，并提示「官方升级会覆盖，需保留补丁记录」。
-- 5 脚本与插件状态：放置 + 依赖适配（如代理脚本的 https-proxy-agent）；插件状态目录（如 dsh-pocket token）恢复，避免重新初始化。
+- 5 脚本与插件状态：放置 + 依赖适配（如代理脚本的 https-proxy-agent）；插件状态目录（如 dsh-pocket token）恢复，避免重新初始化；若含运行时下载二进制（cloudflared.exe 等），确认其就位或可联网下载。
 - 6 数据：可选恢复。
 - 环境适配（统一处理，逐项确认）：路径重写（绝对路径替换旧用户名）；代理脚本 require 绝对路径重写；本地代理（如 sing-box）说明与 `OPENROUTER_PROXY` 覆盖；GitHub 依赖源不可达时的代理/镜像处理。
 
@@ -156,4 +162,6 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 - 环境补丁被官方升级覆盖（第 4 类）——补丁记录要保留、恢复后重应用。
 - 凭据丢失（第 1 类）——默认不打包，需用户显式选择。
 - 代理脚本依赖绝对路径（第 5 类）——新环境需单独安装依赖或改 require。
+- **MANIFEST 与内容失实**（任何类别）——恢复 agent 只信 MANIFEST 会误判（如把「无 bundles」当真而漏配插件激活、把「无绝对路径」当真而不改路径、把「可 pnpm 重装」当真而漏放二进制）。生成时必须按「打包后对账」逐条核对。
+- 插件状态中的运行时下载二进制（如 cloudflared.exe）未就位（第 5 类）——`pnpm install` 不会重装它；恢复后需联网自动下载或手动放置，网络受限时功能不可用。
 - 全新机器安装链断裂（无 Node / npm/GitHub 源不可达）——按「全新环境引导」与「网络与代理处理」逐步验证，每步确认后再继续。
