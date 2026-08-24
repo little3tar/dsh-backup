@@ -16,7 +16,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 | # | 类别 | 内容 | 检测方式 |
 |---|------|------|---------|
 | 1 | **配置** | `settings.yaml`、`.credentials.yaml`、`AGENTS.md`、`skills/` 本地技能 | 读文件、列目录 |
-| 2 | **插件** | `profiles/web/package.json`（依赖 + bundles）、`pnpm-lock.yaml` | 读 package.json |
+| 2 | **插件** | `profiles/web/package.json`（依赖 + bundles）、`pnpm-lock.yaml`、各依赖**实际安装的精确版本** | 读 package.json；`pnpm list --depth 0` 取实际安装精确版本（package.json 里只有 semver 范围） |
 | 3 | **本地依赖** | `package.json` 中 `file:`/`link:` 指向的源码目录（如 pet-remielle） | 解析依赖声明并检查路径存在 |
 | 4 | **环境补丁** | 对 DSH 及已安装组件的自定义修改，三种形态：① 本地源码目录未提交改动（git status/diff）；② 运行部署层被改文件（全局 `node_modules\@deepseek-ai\dsh` 下 index.html 内联 style、dist CSS/JS 与官方不一致）；③ **已安装插件包内文件被改**（如 `profiles/web/node_modules/dsh-pocket/lib/proxy.mjs` 与官方 tarball 不一致） | ① git 检测；② 对比官方/查内联注入；③ 对候选包 `npm pack <pkg>@<版本>` 下载官方 tarball，解压后与本地文件逐一对比 hash，不一致即补丁。**粒度**：默认只对比用户提及/可疑的包；「全量对比」则遍历 `package.json` 全部依赖逐一对比（需联网，耗时较长） |
 | 5 | **自定义脚本、目录与插件状态** | `$DSH_HOME` 下非标准文件与目录（如 `openrouter-proxy.cjs/.cmd`、`debug/`），以及**插件运行时数据目录**（如 `dsh-pocket/` 下的 `token`、`token-lan`、`settings.json` 等登录/密码状态，`bin/` 内**运行时下载的二进制**如 `cloudflared.exe`） | 扫描 `$DSH_HOME` 顶层非标准命名（非 `sessions/storages/synapse/profiles/skills/attachments` 等标准项即视为自定义）；对已知插件状态目录（`dsh-pocket` 等）单独列出并询问是否纳入；状态目录中的二进制需**查证来源**（npm 包内自带 / 运行时下载）并如实记录 |
@@ -40,7 +40,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 逐类检测并产出「环境状态报告」：
 - DSH 版本：`dsh --version`（失败则读 npm 全局 `@deepseek-ai/dsh/package.json`）。
 - 1 配置：`settings.yaml` 存在与模型提供方数量；`skills/` 技能列表。
-- 2 插件：依赖数、bundles 列表、本地 file:/link: 声明。
+- 2 插件：依赖数、bundles 列表、本地 file:/link: 声明；每个依赖的实际安装精确版本（`pnpm list --depth 0`）。
 - 3 本地依赖：每个 `file:` 路径是否存在。
 - 4 环境补丁：
   - 源码：`$DSH_HOME` 下疑似 DSH 源码目录（如 `deepseek-harness`）的 `git status --short` / `git diff --name-only`。
@@ -69,7 +69,8 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   - 运行层修改：把被改的文件复制到 `patches/run/` 下（保留原路径结构），并在 MANIFEST 记录「官方应含什么、本地改成了什么」。
   - 插件包内修改：把被改文件复制到 `patches/node_modules/<包名>/<相对路径>`，MANIFEST 记录包名、版本、官方与本地差异；恢复时先确认目标同版本，再重应用。
 - 生成 **MANIFEST.md**（见下），写入 staging 根。**MANIFEST 以实际复制进 staging 的内容为准**：打包前核对每类实际文件清单；检测到但复制时已消失（源目录被删等）的项，在 MANIFEST 标注「检测时存在、打包时已消失」，不得虚报已包含。**MANIFEST 必须完整填写下方模板**：含分平台 Node 安装的完整命令（如 `winget install OpenJS.NodeJS.LTS`）、具体代理命令（如 `pnpm config set proxy http://<代理>`）、镜像地址，**不得简写**（如只写「winget/brew/apt」这类省略形式），确保恢复 agent 逐字可执行。
-- **打包后对账（防 MANIFEST 失实，必做）**：写入 MANIFEST 后，必须把「MANIFEST 描述」与「staging 实际内容 + 来源环境」三方核对一遍，重点核查三个高发失实点：
+- **打包后对账（防 MANIFEST 失实，必做）**：写入 MANIFEST 后，必须把「MANIFEST 描述」与「staging 实际内容 + 来源环境」三方核对一遍，重点核查以下高发失实点：
+  - **插件实际安装版本**：MANIFEST 版本清单以 `pnpm list --depth 0` 输出为准逐一核对，semver 范围（^x.y.z）不得替代精确版本；同步记录哪些依赖的包内文件与官方 tarball 存在差异（补丁检测③结果）。
   - **bundles 字段**：如实记录「有/无 + 完整列表」。以读 `profiles/web/package.json` 的 `dsh.profile.bundles` 为准，不得凭印象写「无 bundles」。
   - **脚本绝对路径**：对每个纳入的脚本 grep 硬编码绝对路径（Windows 搜 `C:/Users/`、`C:\Users\`；macOS/Linux 搜 `/Users/`、`/home/`）。有则记录**具体文件与位置**（如「openrouter-proxy.cjs 候选路径 2/3 硬编码 `C:/Users/<用户>/AppData/Roaming/npm/...`，恢复时同目录 `npm install https-proxy-agent` 兜底」）；用 `%~dp0`/`$(dirname)` 等相对路径的如实写「无绝对路径，无需改写」。不得笼统写「内部含绝对路径」。
   - **二进制来源**：插件状态目录中的二进制（如 `dsh-pocket/bin/cloudflared.exe`），查证是「npm 包内自带（`pnpm install` 可重装）」还是「运行时下载（首次使用自动拉取，恢复后需联网或手动放置）」——查法：读已安装包目录（`profiles/web/node_modules/<包>/`）是否含该文件。**不得**写「可由 pnpm install 重装」除非确认包内自带。
@@ -88,7 +89,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 - 生成时间 / 来源机器 / 用户名 / 来源 DSH 版本
 - 按类别记录：
   1. 配置：settings.yaml（模型提供方数）、skills 列表；凭据：包含/不包含
-  2. 插件：依赖数、bundles 完整列表
+  2. 插件：依赖数、bundles 完整列表、各依赖实际安装精确版本清单（取自 `pnpm list`，不得用 package.json 的 semver 范围冒充）；registry 依赖同时核对包内文件是否与官方 tarball 一致（版本号相同不代表文件未被更改，如 pnpm 重装后补丁文件回退官方版）
   3. 本地依赖：file: 路径清单与放置要求
   4. 环境补丁：检测到的修改清单（源码未提交改动 / 运行层 index.html 内联 style / dist 文件），备份位置（patches/），恢复时如何应用
   5. 脚本：文件名与用途
@@ -108,7 +109,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
   8. 凭据说明（若含）；启动 dsh web
 - 恢复完成验证清单：
   - `dsh --version` 与来源版本一致（或按用户决策的现有版本）
-  - 插件在位（`pnpm list` 或 node_modules 确认，含本地依赖）
+  - 插件在位且实际安装精确版本与 MANIFEST 版本清单逐一一致（`pnpm list --depth 0` 核对）
   - **file: 依赖实际解析路径与 MANIFEST 记录一致**（`pnpm list` 输出中 `dsh-pet-remielle@file:...` 等路径正确，未被 lock 旧路径带偏）
   - 补丁在位：目标 index.html 含内联 style；proxy.mjs 等与 patches/ 一致
   - 插件状态已放置（如 dsh-pocket token）
@@ -143,7 +144,7 @@ DSH 环境 = **六类组件**。备份/恢复的所有操作（检测、选项�
 ### 2. 对比与取舍（按六类逐项提问；同「通用操作规范」的通用提问语义）
 
 - 1 配置冲突：目标已有值 vs 包内值 → 覆盖/保留/合并。
-- 2 插件差异：目标已装 vs 包内（多/少/版本）→ 说明并让用户决定是否对齐。
+- 2 插件差异：逐项对比目标已装与 MANIFEST 记录——数量（多/少）、实际安装精确版本、包内文件是否被改（patches/ 记录项核 hash；registry 包重装后文件可能回退官方版而版本号不变）→ 说明差异并让用户决定是否对齐。
 - 3 本地依赖：目标缺失 → 放置或改路径。
 - 4 环境补丁：目标是否有相同修改（检测方法同备份，粒度与备份时一致：单包或全量对比）→ 已有则跳过/覆盖；没有则应用，并提示「官方升级会覆盖，需保留补丁记录」。
 - 5 脚本与插件状态：放置 + 依赖适配（如代理脚本的 https-proxy-agent）；插件状态目录（如 dsh-pocket token）恢复，避免重新初始化；若含运行时下载二进制（cloudflared.exe 等），确认其就位或可联网下载。
