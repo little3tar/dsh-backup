@@ -109,6 +109,44 @@ foreach ($p in $pairs) {
   }
 }
 
+# 凭据一致性：包内凭据必须能映回来源环境，且来源确实存在
+# （凭据文件最容易被「默认排除 + 记录不全」静默漏掉：包内文档只说包含 .credentials.yaml，
+#   而 .openai-codex-auth.json 这类第三方登录态既没进包、也没被登记，恢复方根本不知道它存在）
+$credRoot = Join-Path $dst 'credentials'
+if (Test-Path $credRoot) {
+  $credFiles = @(Get-ChildItem $credRoot -Recurse -Force -File | Where-Object { $_.Name -ne 'CREDENTIALS-SOURCES.txt' })
+  $credLines = @()
+  $srcManifest = Join-Path $credRoot 'CREDENTIALS-SOURCES.txt'
+  if (Test-Path $srcManifest) {
+    $credLines = @(Get-Content $srcManifest -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*#' -and $_.Trim() })
+  }
+  if ($credFiles.Count -and -not $credLines.Count) {
+    Write-Output '[失败] credentials/ 有凭据文件但缺 CREDENTIALS-SOURCES.txt —— 恢复方无法知道它们该放回哪里'
+    $fail++
+  }
+  foreach ($line in $credLines) {
+    $parts = $line -split '\s*\|\s*'
+    if ($parts.Count -lt 4) { continue }
+    $srcName = $parts[1]
+    $srcPath = Join-Path $DshHome $srcName
+    if (-not (Test-Path $srcPath)) { Write-Output "[失败] 凭据登记所指来源不存在：$srcName"; $fail++; continue }
+    $packed = Get-ChildItem $credRoot -Recurse -Force -File | Where-Object { $_.Name -eq $srcName }
+    if (-not $packed) { Write-Output "[失败] 凭据 $srcName 已登记但不在包内"; $fail++; continue }
+    if ((Get-FileHash $packed[0].FullName -Algorithm SHA256).Hash -ne (Get-FileHash $srcPath -Algorithm SHA256).Hash) {
+      Write-Output "[失败] 凭据 $srcName 与来源内容不一致"; $fail++; continue
+    }
+    Write-Output ("[OK] 凭据 $srcName 在包内且与来源一致（来源 {0} B）→ 恢复目标 {1}" -f (Get-Item $srcPath).Length, $parts[3])
+  }
+  if ($credFiles.Count -and $credLines.Count) {
+    $registered = @($credLines | ForEach-Object { ($_ -split '\s*\|\s*')[1] })
+    $unregistered = @($credFiles | Where-Object { $registered -notcontains $_.Name })
+    if ($unregistered.Count) {
+      Write-Output ('[失败] credentials/ 中有未登记的凭据文件：' + (($unregistered | ForEach-Object { $_.Name }) -join '、'))
+      $fail++
+    }
+  }
+}
+
 # 本地依赖：核对入口文件与目录层级
 $ldRoot = Join-Path $dst 'local-deps'
 if (Test-Path $ldRoot) {

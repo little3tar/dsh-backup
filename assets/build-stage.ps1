@@ -186,9 +186,28 @@ if ($Categories -contains '4') {
 # --- 5 自定义脚本、目录与插件状态 ---
 if ($Categories -contains '5') {
   Say '=== 5 自定义脚本与插件状态 ==='
-  # 凭据性质的顶层文件：只在 -IncludeCredentials 时纳入（内含令牌/登录态）
+  # 凭据性质的顶层文件：默认不纳入，只有 -IncludeCredentials 才打包（含令牌/登录态）。
+  # 这类文件放 credentials/ 而不是 scripts/，并逐条登记来源路径——
+  # 「名称 + 恢复目标位置」本身就是恢复必需信息，漏登记会让恢复方根本不知道它存在。
   $credentialLike = @('.openai-codex-auth.json', '.anthropic-auth.json', '.auth.json')
   $standard = @('attachments', 'sessions', 'storages', 'synapse', 'profiles', 'skills')
+  $credentialSpecs = @()
+  if ($IncludeCredentials) {
+    foreach ($name in $credentialLike) {
+      $p = Join-Path $DshHome $name
+      if (Test-Path $p -PathType Leaf) {
+        $alias = ($name.TrimStart('.') -replace '\.json$', '')
+        Copy-FileVerified $p ('credentials/' + $alias + '.json')
+        $credentialSpecs += [pscustomobject]@{ Alias = $alias; SourceName = $name; TargetRel = ('credentials/' + $alias + '.json') }
+      }
+    }
+    if ($credentialSpecs.Count) {
+      $credLines = @('# 凭据文件来源与恢复位置（build-stage.ps1 自动登记）', '# alias | 来源文件名 | 包内位置 | 恢复目标')
+      $credLines += $credentialSpecs | ForEach-Object { '{0} | {1} | {2} | $DSH_HOME/{1}' -f $_.Alias, $_.SourceName, $_.TargetRel }
+      [System.IO.File]::WriteAllLines((Join-Path $dst 'credentials' 'CREDENTIALS-SOURCES.txt'), $credLines, (New-Object System.Text.UTF8Encoding($false)))
+      Say ('[OK] credentials/ 凭据登记：' + (($credentialSpecs | ForEach-Object { $_.SourceName }) -join '、'))
+    }
+  }
   $topLevel = Get-ChildItem $DshHome -Force | Where-Object {
     $standard -notcontains $_.Name -and
     $_.Name -notin @('.credentials.yaml', 'settings.yaml', 'AGENTS.md') -and

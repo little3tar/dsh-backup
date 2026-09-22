@@ -86,12 +86,26 @@ try {
   }
 } catch { $installed += '(pnpm list 失败：原因见运行输出)' }
 
-# 配置提供方
+# 配置提供方：只数 llm-pi-ai.providers 下的条目。
+# 不能用「缩进 4 空格即提供方」的粗暴正则——像 llm-deepseek: {} 这种顶层段的子键
+# 同样是 4 空格缩进，会被误算进去（实测把 3 个提供方报成 4 个）。
 $providerNames = @()
 $settingsPath = Join-Path $dst 'config\settings.yaml'
 if (Test-Path $settingsPath) {
   $txt = Get-Content $settingsPath -Raw -Encoding UTF8
-  $providerNames = @([regex]::Matches($txt, '(?m)^\s{4}([a-z0-9][a-z0-9-]*):\s*$') | ForEach-Object { $_.Groups[1].Value })
+  $block = [regex]::Match($txt, '(?ms)^llm-pi-ai:\s*\r?\n(.*?)(?=^\S|\z)').Groups[1].Value
+  $providerNames = @([regex]::Matches($block, '(?m)^\s{4}([a-z0-9][a-z0-9-]*):\s*$') | ForEach-Object { $_.Groups[1].Value })
+}
+
+# 凭据清单：以 build-stage.ps1 写出的凭据登记为准（含包内别名与恢复目标位置）
+$credentialEntries = @()
+$credSources = Join-Path $dst 'credentials\CREDENTIALS-SOURCES.txt'
+if (Test-Path $credSources) {
+  foreach ($line in (Get-Content $credSources -Encoding UTF8)) {
+    if ($line -match '^\s*#' -or -not $line.Trim()) { continue }
+    $parts = $line -split '\s*\|\s*'
+    if ($parts.Count -ge 4) { $credentialEntries += [pscustomobject]@{ Alias = $parts[0]; SourceName = $parts[1]; Target = $parts[3] } }
+  }
 }
 
 # skills 清单
@@ -175,8 +189,20 @@ if (Test-Path $settingsPath) {
 } else { W '- `config/settings.yaml`：**未纳入**' }
 W ('- `config/skills/`：{0}' -f $(if ($skills.Count) { '本地技能 ' + $skills.Count + ' 个 —— ' + ($skills -join '、') } else { '未纳入' }))
 if (Test-Path (Join-Path $dst 'credentials\.credentials.yaml')) {
-  W '- `credentials/.credentials.yaml`：**包含（明文凭据）**——请妥善保管、勿经不信任渠道传输；恢复后建议收紧文件权限。'
-} else { W '- 凭据：**未包含**（默认不打包）' }
+  W '- `credentials/.credentials.yaml`：**包含（明文凭据）**'
+}
+if ($credentialEntries.Count) {
+  W '- 其它凭据文件（由 `build-stage.ps1` 登记，**这些不是能重新生成的文件**）：'
+  foreach ($c in $credentialEntries) {
+    W ('  - `credentials/{0}` ← 来源 `$DSH_HOME/{1}`；恢复目标 `{2}`' -f ($c.Alias + '.json'), $c.SourceName, $c.Target)
+  }
+}
+if (-not $credentialEntries.Count -and -not (Test-Path (Join-Path $dst 'credentials\.credentials.yaml'))) {
+  W '- 凭据：**未包含**（默认不打包）'
+}
+if ((Test-Path (Join-Path $dst 'credentials\.credentials.yaml')) -or $credentialEntries.Count) {
+  W '- 以上均为**明文凭据**：仅经可信渠道传输，恢复后按需收紧文件权限；恢复目标位置见上文逐条标注（注意区分 `$DSH_HOME` 根目录与子目录）。'
+}
 W ''
 W '### 2. 插件清单（`plugins/`）'
 W ''
@@ -264,6 +290,16 @@ foreach ($cand in @('config\settings.yaml', 'config\AGENTS.md', 'credentials\.cr
 }
 foreach ($d in $localDeps) {
   foreach ($t in ($d.Tree | Select-Object -First 10)) { $hashTargets += ("local-deps\{0}\{1}" -f $d.Dir, ($t -replace '/', '\')) }
+}
+# 凭据与技能资产：逐文件纳入 hash 清单（别只列 .credentials.yaml，否则凭据文件在
+# MANIFEST 里没有校验值，恢复方无法核对）
+foreach ($sub in @('credentials', 'config\skills')) {
+  $base = Join-Path $dst $sub
+  if (Test-Path $base) {
+    Get-ChildItem $base -Recurse -Force -File | ForEach-Object {
+      $hashTargets += $_.FullName.Substring($dst.Length).TrimStart('\')
+    }
+  }
 }
 foreach ($h in ($hashTargets | Select-Object -Unique)) {
   $row = HashRow $h
