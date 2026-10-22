@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/little3tar/dsh-backup/schema/manifest.schema.json",
+  "title": "dsh-backup manifest",
+  "description": "备份包内 manifest.json 的结构。它是唯一事实源，MANIFEST.md 由它渲染。",
+  "type": "object",
+  "required": ["schemaVersion", "generator", "source", "scope", "profiles", "skills", "localDeps", "credentials", "patches", "data", "integrity", "restore"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "generator": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": { "name": { "type": "string" }, "version": { "type": "string" } }
+    },
+    "createdAt": { "type": "string", "description": "ISO 8601 时间" },
+    "source": {
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string" },
+        "dsh": { "type": ["string", "null"] },
+        "node": { "type": ["string", "null"] },
+        "pnpm": { "type": ["string", "null"] },
+        "machine": { "type": ["string", "null"], "description": "仅作溯源，不得写进任何恢复命令" },
+        "user": { "type": ["string", "null"] }
+      }
+    },
+    "scope": {
+      "type": "object",
+      "required": ["categories", "credentials", "profiles"],
+      "properties": {
+        "categories": { "type": "array", "items": { "enum": ["1", "2", "3", "4", "5", "6"] } },
+        "credentials": { "type": "boolean" },
+        "profiles": { "type": "array", "items": { "type": "string" } },
+        "note": { "type": ["string", "null"] }
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "bundles"],
+        "properties": {
+          "name": { "type": "string" },
+          "bundles": { "type": "array", "items": { "type": "string" } },
+          "declared": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "spec": { "type": "string" } } } },
+          "configLayer": {
+            "type": ["object", "null"],
+            "properties": {
+              "file": { "type": "string" },
+              "entries": { "type": "array", "items": { "type": "object", "required": ["id"], "properties": { "id": { "type": "string" }, "sha256": { "type": "string" } } } },
+              "unkeyed": { "type": "number" }
+            }
+          },
+          "installed": {
+            "type": "object",
+            "properties": {
+              "source": { "type": ["string", "null"] },
+              "list": { "type": "array", "items": { "type": "object", "required": ["name", "version"], "properties": { "name": { "type": "string" }, "version": { "type": "string" } } } }
+            }
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "type": "object", "required": ["root", "dir", "names"], "properties": { "root": { "type": "string" }, "dir": { "type": "string" }, "names": { "type": "array", "items": { "type": "string" } } } }
+    },
+    "localDeps": {
+      "type": "array",
+      "items": { "type": "object", "required": ["profile", "dir", "name"], "properties": { "profile": { "type": "string" }, "dir": { "type": "string" }, "name": { "type": "string" }, "version": { "type": ["string", "null"] }, "main": { "type": ["string", "null"] } } }
+    },
+    "credentials": {
+      "type": "array",
+      "items": { "type": "object", "required": ["source", "packed", "target"], "properties": { "source": { "type": "string" }, "packed": { "type": "string" }, "target": { "type": "string" }, "sha256": { "type": ["string", "null"] } } }
+    },
+    "patches": {
+      "type": "array",
+      "items": { "type": "object", "required": ["path"], "properties": { "profile": { "type": "string" }, "package": { "type": ["string", "null"] }, "path": { "type": "string" }, "sha256": { "type": ["string", "null"] } } }
+    },
+    "data": {
+      "type": "array",
+      "items": { "type": "object", "required": ["name", "files", "bytes"], "properties": { "name": { "type": "string" }, "files": { "type": "number" }, "bytes": { "type": "number" } } }
+    },
+    "integrity": {
+      "type": "object",
+      "required": ["files", "bytes", "sha256Index"],
+      "properties": {
+        "files": { "type": "number" },
+        "bytes": { "type": "number" },
+        "sha256Index": { "type": "array", "items": { "type": "object", "required": ["path", "sha256"], "properties": { "path": { "type": "string" }, "bytes": { "type": "number" }, "sha256": { "type": "string" } } } }
+      }
+    },
+    "restore": {
+      "type": "object",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["op"],
+            "properties": {
+              "op": { "enum": ["merge-yaml-array-by-key", "copy", "copy-credentials", "install-plugins", "apply-patches", "restore-data"] },
+              "from": { "type": "string" },
+              "to": { "type": "string" },
+              "profile": { "type": "string" },
+              "note": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

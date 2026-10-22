@@ -3,250 +3,165 @@ name: dsh-backup
 description: >
   备份与恢复 DeepSeek Harness (DSH) 环境。把环境视为六类组件的集合
   （配置 / 插件 / 本地依赖 / 环境补丁 / 自定义脚本与状态 / 数据），按类别检测、取证、选择、打包、对比、恢复。
-  生成跨平台通用、自带 MANIFEST 解释与恢复指导的 ZIP，支持在无 DSH 的新环境按指导安装与恢复。
+  导出为「JSON 契约 + 渲染出的 MANIFEST.md」的自包含包，恢复端用同一份 Node 脚本按计划执行。
   当用户说「备份 DSH / 备份配置」、「恢复 DSH / 恢复配置 / 还原环境」、「迁移 DSH / 复刻环境 / 换机器」，或用户提供 dsh-backup-*.zip 备份包文件引用时激活。
 ---
 
 # DSH 环境备份与恢复
 
-## 环境模型（本技能的统一框架）
+## 设计：契约与执行器分离
 
-DSH 环境 = **六类组件**。检测、选项、清单、对比、恢复全部按这六类组织：
+| 层 | 是什么 | 谁消费 |
+|---|---|---|
+| `manifest.json` | 包内**唯一事实源**：profile / bundles / 配置层 entry / 依赖 / 凭据 / 补丁 / 数据 / 校验值 / 声明式恢复步骤 | 恢复端脚本、另一个 agent、任何工具 |
+| `MANIFEST.md` | **由 manifest.json 渲染**的叙述版 | 人、agent |
+| `plan.json` | 恢复时针对**目标机**生成的计划（含待决策项） | agent 审阅后执行 |
+| `bin/dsh-backup.mjs` | 执行器：**Node 单文件、零第三方依赖、三端同一份** | 本机 shell |
+
+两条硬规则：**数字只来自实测**（manifest.json 由脚本对 staging 实测生成，MANIFEST.md 只从它渲染）；**执行器不猜**（缺信息产出 `decisions[]` 让 agent 去问）。
+
+为什么是 Node：DSH 自身要求 **Node ≥ 22.19**，所以「能跑 DSH 的机器必然有 Node」——它不是额外依赖，而是问题域的不变量。bash 在 Windows 不存在、PowerShell 在裸 Linux 不存在、Python 在 Windows 不保证。
+
+## 环境模型（六类组件）
 
 | # | 类别 | 内容 | 检测与取证方式 |
 |---|------|------|---------------|
-| 1 | **配置** | `settings.yaml`、`.credentials.yaml`、`AGENTS.md`、`skills/` 本地技能 | 读文件、列目录（技能目录只扫描 `skills/<名字>/SKILL.md` 这一层） |
-| 2 | **插件** | `profiles/web/package.json`（依赖 + `dsh.profile.bundles`）、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.yml`、`cordis.patch.yml`、各依赖**实际安装的精确版本** | `pnpm list --depth 0` 取实际安装版本——**package.json 里只有 semver 范围，不能当版本记录** |
-| 3 | **本地依赖** | 依赖声明中 `file:`/`link:` 指向的源码目录 | 解析依赖声明，检查路径存在；确认是**目录、Junction 还是符号链接**，并核对 lock 中的解析路径 |
-| 4 | **环境补丁** | 对 DSH 及已安装组件的自定义修改，三种形态：① 本地源码目录未提交改动；② 运行部署层被改文件（全局安装目录下的前端 `dist/index.html`、CSS/JS）；③ **已安装插件包内文件被改** | ① `git status/diff`（不是 git 仓库就如实记为「无 git，无法用此形态检测」）；②③ 下载官方 tarball 逐一对比，见「补丁取证」 |
-| 5 | **自定义脚本、目录与插件状态** | `$DSH_HOME` 下非标准命名项（脚本、`debug/`、插件数据目录等），以及插件的**运行时数据**（登录令牌、设置、运行时下载的二进制） | 列出 `$DSH_HOME` 顶层全部条目，非标准项即候选；对已知插件状态目录单独列出并询问；其中的二进制须**查证来源**（包内自带 / 运行时下载） |
-| 6 | **数据** | `sessions/`、`storages/`、`synapse/`、`attachments/` 等 | 统计体积与文件数 |
+| 1 | **配置** | 每个 profile 的**用户配置层** `profiles/<名>/cordis.patch.yml`；`AGENTS.md`；5 处技能根下的技能；顶层凭据类文件 | `detect`：读文件、列目录；统计 patch 层 `- id:` 条目数；技能**两种形态都认** |
+| 2 | **插件** | 逐 profile：`package.json`（依赖 + `dsh.profile.bundles`）、lock、workspace、`cordis.yml`、`compatibility.json`、**精确安装版本** | `pnpm list --depth 0 --json`，取不到回退读 `node_modules/<包>/package.json` |
+| 3 | **本地依赖** | `file:`/`link:` 指向的源码目录 | 解析声明、确认目录/Junction/符号链接、记录真实目标 |
+| 4 | **环境补丁** | ① 源码未提交改动 ② 部署层被改文件 ③ **插件包内文件被改** ④ profile 里的补丁留档 | ①② 看 `detect` 线索；③ `patchscan` 逐文件比官方 tarball；④ profile 非标准项枚举 |
+| 5 | **脚本、目录与插件状态** | `$DSH_HOME` 顶层非标准项；插件运行时数据 | 列顶层全部条目；二进制须**查证来源** |
+| 6 | **数据** | `sessions/`、`storages/`、`synapse/`、`attachments/v1/` | 体积与文件数 + **数据格式版本** |
 
-**`$DSH_HOME` 默认值**：Windows `%USERPROFILE%\.dsh`；macOS/Linux `~/.dsh`。环境变量 `DSH_HOME` 存在时以它为准（所有命令用 `$DSH_HOME` 而不是写死路径）。
+**路径变量**：`$DSH_HOME`（Windows `%USERPROFILE%\.dsh`，macOS/Linux `~/.dsh`）、`$DSH_AGENTS_HOME`（默认 `~/.agents`）。
 
-## 通用操作规范（两种模式都必须遵守）
+**profile 是备份的单位**：`$DSH_HOME/profiles/` 下可有任意多个 profile，另有共享的 `profiles/node_modules/`。**只处理一个 profile 会静默漏掉其余**。
 
-1. **提问驱动（跨 agent 通用）**：每个决策点都向用户提问并给出选项，不让用户写大段文字。**实现方式随运行环境**：DSH 用 `ask_user_question`（结构化选项）；其他 agent 若没有同名工具，用其等效提问机制（权限弹窗 / 对话框），或直接以文本列出选项（如「A/B/C，回复编号或名称」）等待回答。**本技能内所有「提问」均指此通用语义**，不依赖任何特定工具名。
-2. **固定套路**：备份 = 检测 → 取证 → 选项 → 打包 → 对账 → 交付；恢复 = 检测 → 对比 → 恢复 → 验证。流程不变。
-3. **保守默认**：凭据默认不打包（选择后提示加密/私传）；覆盖目标机器已有文件前必须确认；恢复过程中不删除目标机器任何未涉及文件。
-4. **提问只给选项、不下结论**：体积、取舍、是否升级等都要给用户实测数字 + 选项，不替用户拍板。
-5. **执行纪律**：文件复制与打包用前台命令；确需后台时，完成后必须校验 staging 非空、ZIP 存在且条目数 > 0。
-6. **权限处理（沙箱实测经验）**：输出到工作区外、或需要读取用户级缓存/凭据时，可能被沙箱拒绝——按默认方式执行一次，被拒后用更宽权限**重试同一条命令**并说明原因。已实测的两类拒绝：
-   - **TLS 连接被阻断**（如 `curl` 报 Schannel `SEC_E_NO_CREDENTIALS`、HTTP 码 `000`）：更宽权限下同一命令即成功，属沙箱限制，不是网络故障。
-   - **包管理器写用户级缓存被拒**（`npm` 报 `EPERM ... npm-cache\_cacache\tmp`、`corepack` 报 `mkdir ... AppData\Local\node\corepack`）：把缓存目录指到工作区内即可绕过，无需提权——`npm pack <包> --cache <工作区>/.cache --pack-destination <工作区>/out`。
-7. **ZIP 通用性**：统一打包 ZIP（Windows 资源管理器 / macOS Finder / Linux `unzip` 均原生支持）。文件量大时优先用 `tar.exe -a -c -f <包.zip> -C <父目录> <子目录>`（Windows 10+ 自带 bsdtar，实测 1.5 万文件 / 600 MB 约 80 秒），避免 `Compress-Archive` 在大目录上过慢。命令行解压缺失时用 PowerShell `Expand-Archive`、`python -m zipfile -e` 或图形界面双击，均无需额外安装。
-8. **凭据卫生**：上传/恢复用的口令只用于本次操作，**不得写入 MANIFEST 或任何备份文件**，也不回显到日志。
+**技能根有 5 处**：项目级 `<项目>/.dsh/skills`、项目级 `<项目>/.agents/skills`、自定义目录、用户级 `$DSH_HOME/skills`、用户级 `$DSH_AGENTS_HOME/skills`。
+
+## 运行时规则
+
+| 规则 | 内容 |
+|------|------|
+| **用户配置只在 patch 层** | `profiles/<名>/cordis.patch.yml` 是顶层 YAML 数组，元素为 loader patch entry，**在全部 bundle 层之后应用**且热加载。`cordis.yml` 只是空入口清单。恢复**按 entry `id` 合并**，绝不整文件覆盖 |
+| **profile 固定清单** | `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.yml`、`cordis.patch.yml`、`compatibility.json`、`.dsh-market/`、`node_modules/`；其余都是「非标准项」 |
+| **DSH CLI** | `dsh [--profile] <名>`；`dsh plugin --profile <名> <pnpm 参数…>`（首次使用初始化 profile，**已存在文件一律不动**）；`--from-default-profile` 会**覆盖**；`--dump-config` 核对组合结果 |
+| **插件版本兼容** | 插件 `engines.dsh`（无则看 `\@deepseek-ai/dsh*` peer）不满足时**阻止安装与激活**；补救是换版本或 `dsh plugin allow-version` 授精确版本豁免（先告知风险） |
+| **凭据优先级 4 层** | `$DSH_HOME/.credentials.yaml` > 进程环境变量 > `<调用目录>/.env` > `$DSH_HOME/.env` |
+| **附件路径** | `$DSH_HOME/attachments/v1` |
+| **部署层前端产物** | `require.resolve('@deepseek-ai/dsh-web-frontend/package.json')` + `/dist/index.html`，不要写死嵌套路径 |
+| **数据格式** | `sessions/`、`storages/` 版本化，跨版本恢复前先确认目标能读来源 |
+
+## 命令速查
+
+唯一入口 `bin/dsh-backup.mjs`。全局：`--home`、`--agents-home`、`--json`、`--help`。
+
+| 子命令 | 写盘 | 作用 |
+|---|---|---|
+| `detect` | 否 | 六类只读盘点 → Markdown / `--json` |
+| `size` | 只写探测 ZIP | 文件数 / 原始体积 / 压缩后 / 压缩率 / 耗时 |
+| `stage` | 写 staging | 按六类复制，每类复制后立即双向校验 |
+| `doc` | 是 | 生成恢复指导骨架 |
+| `pack` | 是 | 写 `manifest.json` + `MANIFEST.md` → ZIP → **解压回读对账** |
+| `patchscan` | 是（下载） | 逐 profile 与官方 tarball 逐文件 SHA256 对比；`--export` 导出差异；**registry 失败自动 fallback**（默认 npm 配置 → npmmirror → npmjs，也可 `--registry` 显式给链） |
+| `upload` | 远端写 | PROPFIND → MKCOL → PUT → **PROPFIND 核长度** |
+| `plan` | 否（可 `--out`） | 包 vs 目标 → `plan.json`（含 `decisions[]`） |
+| `apply` | **默认 dry-run** | `--apply` 才写盘；覆盖前备份 `.bak-<时间戳>` |
+| `verify-staging` | 否 | 复核 staging 与来源环境（agent 手工改过 staging、或间隔较久后打包前跑） |
+| `verify` | 否 | 目标机验收；失败退出码 20 |
+
+**退出码**：`0` 成功 / `1` 错误 / `20` 验收失败 / `30` 环境缺失。**`--json` 时 stdout 只有一个 JSON 文档**，诊断走 stderr。
+
+## 通用操作规范
+
+1. **提问驱动**：每个决策点都向用户提问并给选项（DSH 用 `ask_user_question`，其他 agent 用等效机制）。
+2. **固定套路**：备份 = 检测 → 取证 → 选项 → 打包 → 对账 → 交付；恢复 = 检测 → 对比 → 执行 → 验证。
+3. **保守默认**：凭据默认不打包；覆盖前必须确认；恢复不删除目标机器未涉及的文件。
+4. **只给选项、不下结论**：用实测数字说话。
+5. **执行纪律**：复制与打包用前台命令；完成后校验 staging 非空、ZIP 存在且条目数 > 0。
+6. **权限处理**：沙箱拒绝时用更宽权限重试同一条命令并说明原因；包管理器缓存被拒时把缓存指到工作区内。
+7. **ZIP 通用性**：三端都有 `tar`，执行器自动探测并检查退出码，失败即抛错。
+8. **凭据卫生**：口令只用于本次操作，不写进 MANIFEST 或任何备份文件。
 
 ---
 
 ## 备份模式
 
-### 1. 环境检测（只读，按六类）
+### 1. 环境检测（只读）
 
-逐类检测并产出「环境状态报告」，其中体积与版本必须是**当场实测值**：
+```bash
+node bin/dsh-backup.mjs detect --json --out env-report.json
+```
 
-- DSH 版本：`dsh --version`（失败则读 npm 全局 `@deepseek-ai/dsh/package.json` 的 `version`）；同时记录 Node 与 pnpm 版本。
-- 1 配置：`settings.yaml` 存在与模型提供方数量、`skills/` 技能列表、凭据文件是否存在。
-- 2 插件：依赖数量、`dsh.profile.bundles` **完整列表**（读 `package.json` 的 `dsh.profile.bundles`，不要凭印象写「无 bundles」）、本地 `file:`/`link:` 声明、以及 `pnpm list --depth 0` 的精确版本表。
-- 3 本地依赖：每个 `file:`/`link:` 路径是否存在、类型（目录 / Junction / 符号链接）、lock 中的解析值。
-- 4 环境补丁：按「补丁取证」三种形态各查一遍。
-- 5 脚本与状态：`$DSH_HOME` 顶层非标准项逐条列出；插件状态目录（令牌、设置、运行时二进制）单独列出。
-- 6 数据：各目录体积（MB）与文件数。
+必须有：版本链、**profile 枚举**、逐 profile 的 patch 条目数与模型提供方、bundles、精确版本、`engines.dsh` 要求、profile 非标准项、本地依赖、顶层点文件、数据体积。
 
-### 2. 插件补丁取证（类别 4 的核心）
+### 2. 插件补丁取证
 
-**判定原则：与官方发布版一致的东西不需要打包，不一致的必须打包并标注恢复办法。** 具体到 `node_modules`、插件包、部署层文件——**不要凭感觉判断「能不能在新机器重新下载」，一律以逐文件对比结论为准**。
+```bash
+node bin/dsh-backup.mjs patchscan --work <WorkDir> --export <WorkDir>/patches
+# 大陆网络不稳时可显式给 registry 链（按顺序尝试，成功即止）
+node bin/dsh-backup.mjs patchscan --work <WorkDir> --export <WorkDir>/patches \
+  --registry "https://registry.npmmirror.com,https://registry.npmjs.org"
+```
 
-**三种形态各自的取证方法**：
-
-- **① 源码未提交改动**：对疑似 DSH 源码目录执行 `git status --short` / `git diff`。**若该目录不是 git 仓库，如实记录「非 git 仓库，此形态不适用」**，不要默认「无改动」。
-- **② 运行部署层**：定位全局安装下的前端产物（如 `<npm 全局>/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-frontend/dist/`），检查 `index.html` 是否有非官方注入（如内联 `<style>`），并下载同版本官方包对比文件名与 hash。
-- **③ 插件包内文件**：对每个 registry 依赖执行 `npm pack <包名>@<精确版本>` 下载官方 tarball，解压后与 `profiles/web/node_modules/<包>/` **逐文件 SHA256 对比**。
-
-**对比口径与处置规则**：把差异分成三类，逐类判读并落到处置动作——
-
-| 差异类型 | 判读 | 处置 |
-|---|---|---|
-| 内容不一致（同名文件 hash 不同） | **真补丁** | 打包进 `patches/node_modules/<包名>/<相对路径>`，并在 MANIFEST 记录包名、版本、官方与本地差异、恢复办法 |
-| 官方有、本地无 | 可疑删改 | 记录并询问用户，不擅自补回 |
-| 本地有、官方无 | 多数是安装机制产物（pnpm store 链接、`node_modules` 嵌套、包管理器注入的元数据文件） | **先判断来源再决定是否算差异**，不要一律当补丁 |
-
-**对比结论直接决定要不要打包**：
-
-- 全部一致 → **不打包这些依赖**，MANIFEST 写明「已逐文件对比 N 个包，差异 0 项；恢复时 `pnpm install` 按精确版本重建即可」，并列出对比的包数与版本，让恢复方可以复核。
-- 存在差异 → **只打包差异文件**（不必打包整个依赖），MANIFEST 写明「哪个包、哪个版本、哪个文件、官方是什么、本地改成了什么、恢复时怎么重应用」，并把「升级/重装会覆盖，需重新应用」写进恢复步骤。
-
-**产物升级为更优形态时如实说明**：例如曾用「往 `index.html` 注入内联样式」修滚动条，后来改成插件实现——此时类别 4 结论应为「无补丁」，并说明该修改现由类别 3 的插件承担，恢复时必须确认插件已登记进 bundles。
-
-**粒度**：默认做全量对比（对全部 registry 依赖逐一对比）；用户只关心个别包时可缩小范围，但要在 MANIFEST 中写明「对比了哪些、未对比哪些」。
+原则：**与官方发布版一致的不打包**。三类差异：内容不一致（真补丁）/ 官方有本地无（可疑删改）/ 本地有官方无（多为安装产物）。结论写进 MANIFEST（对比了哪些包、多少文件、差异数）。
 
 ### 3. 备份选项（提问，多选）
 
-按六类给选项，每项带**实测体积**，并在最前提供「全选」快捷选项：
+按六类给选项，每项带实测体积，最前给「全选」，默认推荐 1+2+3+4+5。
 
-- （快捷）**全选**（1-6 全部 + 凭据）
-- 1 配置（推荐）
-- 2 插件清单（推荐）
-- 3 本地依赖源码（推荐；`file:`/`link:` 依赖无法从任何源下载，不备则无法重建）
-- 4 **环境补丁**（检测到差异时推荐；说明「含 N 处自定义修改，恢复时重新应用」）
-- 5 **自定义脚本、目录与插件状态**（推荐；含插件状态时说明「恢复后免重新初始化」，并提示这些文件会随备份传输）
-- 6 数据（可选，按需）
-- 凭据（默认不选；选了要提示「明文凭据将随备份传输」）
+`node_modules` 是否打包用数字说话：
 
-默认推荐 1+2+3+4+5。
-
-**当用户要求「完全复刻 / 换机器后一模一样」时**，需要主动厘清 `node_modules` 是否要打包——但**结论来自上一步的取证，不是来自用户的主观判断**：
-
-- 先实测并给出数字：`profiles/web/node_modules` 与 `profiles/node_modules` 的**文件数、原始体积、实际压缩后体积、压缩耗时**（可先在 staging 之外压一次测体积）。
-- 实测参考：600 MB / 1.5 万文件的 `node_modules`，ZIP 后仍约 **227 MB**（压缩率约 37%），其中大量是文档、sourcemap、字体等冗余文件。
-- 把选项交给用户：
-  - **不打包（默认推荐）**：前提是类别 4 结论为「与官方发布版一致」——此时 `pnpm install` 按精确版本重建的结果是确定的；若存在真补丁，则先应用 `patches/` 再安装。
-  - **打包 `node_modules`**：完全离线、无需源可达，但包体增大一到两个数量级，且**仍无法替代类别 3**（`file:`/`link:` 依赖的源码不在其中）。
-- 注意：`pnpm install` 重建还需要联网；若目标环境很可能无外网，则「打包 `node_modules`」的价值上升，应向用户点明这个权衡。
-
-### 3.1 凭据类文件的处置（极易静默漏掉）
-
-- **先识别**：`$DSH_HOME` 下除 `settings.yaml`、`AGENTS.md` 之外的顶层点文件多为凭据或插件状态——如 `.credentials.yaml`、`.openai-codex-auth.json`（第三方 LLM 插件的账户登录态）、`.anonymous-user-id`（匿名身份）。逐个判断它属于**凭据**（不可重生成，丢了要重新登录/重新申请）还是**普通数据**。
-- **默认保守**：凭据默认不打包，但要向用户说明后果。**用户明确要求「完全复刻 / 换一台机器一模一样」时，必须逐个点名询问是否纳入**——这类文件不随包走，新机器就得重新走一遍授权流程。
-- **纳入时逐条登记**（缺一不可）：每个凭据文件都要在 MANIFEST 里记录 **来源文件名 → 包内位置 → 恢复目标位置（用 `$DSH_HOME` 书写）**。建议同时写一份 `credentials/CREDENTIALS-SOURCES.txt` 机器登记表，由打包脚本生成，避免靠人记。
-- **注意恢复目标并不都在同一层**：`.credentials.yaml` 回 `$DSH_HOME/.credentials.yaml`；`.openai-codex-auth.json` 也回 `$DSH_HOME/` 根目录——**不要因为它放在包内的 `credentials/` 子目录，就误以为恢复到 `$DSH_HOME/credentials/`**。包内目录只为分类，恢复位置一律以 MANIFEST 标注为准。
-- **记录完整性是硬要求**：凡未纳入的项，都必须在 MANIFEST 的**对应类别**里逐条写清「文件名 + 用途 + 恢复影响」；不能只写一句笼统的「凭据未包含」，也不能只在恢复步骤末尾一笔带过。凭据文件尤其致命——漏登记意味着恢复方**根本不知道这个文件存在**，插件功能缺失却查不出原因。
-- **属性差异**：`.credentials.yaml` 是 DSH 自身的凭据文件；第三方插件的 auth 文件通常是稳定的授权凭据（一次登录长期有效）。两者都属敏感数据，传输前提示用户，恢复后建议收紧权限。
-
-### 4. 执行打包
-
-**配套脚本（本技能的 `assets/` 目录）**：本节不必从零手写命令，直接用同目录下的脚本——它们把下面所有硬约束都实现好了，且全部参数化、不写死任何本机路径：
-
-| 脚本 | 对应环节 | 关键行为 |
-|------|---------|---------|
-| `assets/compare-patches.ps1` | 补丁取证（上节） | 取精确版本 → `npm pack` 官方 tarball → 逐文件 SHA256 对比 → 输出三类差异；`-ExportPatches` 直接把差异导出成可打包的补丁目录 |
-| `assets/build-stage.ps1` | 建 staging | 按类别复制 + 每类复制后立即双向校验；自动解析 `file:`/`link:` 依赖（含 Junction 真实目标）；默认排除 `node_modules` 与运行时生成物；凭据文件由 `-IncludeCredentials` 控制，纳入时**自动生成 `credentials/CREDENTIALS-SOURCES.txt` 登记表**（来源文件名 / 包内位置 / 恢复目标） |
-| `assets/verify-stage.ps1` | 独立复核 | 整树路径双向 diff + hash 比对 + 本地依赖 `main`/`exports` 入口可达性；数据类目录只比路径与数量（运行中的 DSH 会持续写会话日志） |
-| `assets/pack-final.ps1` | 生成 MANIFEST 元数据 + 打包 + 对账 | 全部元数据实时实测生成；追加恢复指导；打包后解压回读双向对账；与来源环境抽样复核；输出 SHA256 |
-
-典型调用（`$Work` 指向任意可写工作目录，例如当前工作区内）：
-
-```powershell
-$A = '<本技能目录>/assets'; $Work = '<可写的工作目录>'
-pwsh -File "$A/compare-patches.ps1" -WorkDir $Work -ExportPatches "$Work/patches"
-pwsh -File "$A/build-stage.ps1"     -WorkDir $Work -Categories 1,2,3,4,5,6 -IncludeCredentials -ExcludeTopLevel 'dsh-pocket'
-pwsh -File "$A/verify-stage.ps1"    -WorkDir $Work
-pwsh -File "$A/pack-final.ps1"      -WorkDir $Work -OutputDir '<交付目录>'
+```bash
+node bin/dsh-backup.mjs size --work <WorkDir>
 ```
 
-- `pwsh -File` 传 `-Categories 1,2,3` 会被当成**单个字符串**，脚本内部已自行拆分；若在别处写同类脚本要留意这个坑（`-contains '1'` 对字符串是按元素比较，会静默地全不匹配，产出空 staging）。
-- `pack-final.ps1` 需要的恢复指导正文（`<WorkDir>/manifest-recovery.md`）**必须由 agent 依据本次环境撰写**：它含来源环境的具体路径、端口、本地依赖清单，属「本次备份的叙述」，不能预先硬编码进技能。缺该文件时脚本只写元数据段并在包内标注待补。
-- **脚本会被上游同步覆盖**：若本项目的 `dsh-backup` 技能来自 GitHub 同步，本地新增的 `assets/` 与 SKILL.md 改动可能被覆盖。恢复来源：项目工作区 `.dsh/skills/dsh-backup/assets/` 保留同一份脚本（哈希已核对一致），需要时复制回技能目录即可。
+给出每个 `node_modules` 的文件数 / 原始体积 / 压缩后 / 压缩率 / 耗时，再让用户选：不打包（默认，需联网重装）或打包（离线，但包体大一到两个数量级，且仍替代不了类别 3）。
 
-**（a）建 staging 并按类别复制**
+### 4. 凭据 / 顶层点文件
 
-- 隐藏文件要一并复制（PowerShell 加 `-Force`；注意 `~/.dsh` 下的 `.credentials.yaml`、`.anonymous-user-id` 等点文件）。
-- 排除项：`node_modules`、包管理器缓存、`.pnpm-store`、`.git`，以及**运行时自动生成物**（如 `profiles/web/.dsh-module-fallback/`——实测只有空目录骨架，运行时自动重建，打包无意义；在 MANIFEST 中说明未纳入及原因）。
-- **复制目录树一律用 `Copy-Item -Recurse`（POSIX 用 `cp -a`）或按相对路径逐文件落盘**。**禁止 `Get-ChildItem -Recurse | Copy-Item -Destination <目标>` 管道写法**——管道把每个文件单独递给 `Copy-Item`，递归层级信息丢失，所有子目录文件被静默拍平到目标根。
-- **每次目录复制后立即比对源与目标的目录层级树（含空目录与嵌套深度）**，层级不一致就删掉重拷。
-- **`file:`/`link:` 依赖的源码目录原样打包**（含其 `package.json`、`exports` 指向的全部文件、bundle patch），这是类别 3 的交付物。
+判据是「**能不能重新生成**」，不是「在不在名单里」。顶层**全部点文件**都是候选，逐个判定。默认不打包；用户要求完全复刻时逐个点名询问。纳入时（`--include-credentials`）自动生成 `credentials/CREDENTIALS-SOURCES.txt`（`来源文件名 | 包内位置 | 恢复目标`）。包内 `credentials/` 只是分类，**恢复目标都在 `$DSH_HOME` 根目录**。未纳入的项在 MANIFEST 对应类别里逐条写「文件名 + 用途 + 恢复影响」。
 
-**（b）MANIFEST 的元数据不许手写**
+### 5. 执行打包
 
-- 字节数、hash、时间戳、条目数等元数据，必须在打包**最后一步**用命令对 staging 实际读取后生成。
-- 实践做法：写一个**生成脚本**（脚本本身也被打包归档，供恢复方复现），脚本负责：遍历 staging 统计文件数/总字节数、对关键文件取 SHA256、从 `pnpm list` 实时取精确版本表、从 `package.json` 读 bundles、对脚本 grep 硬编码绝对路径，然后直接写出 MANIFEST 的元数据段与恢复指导段。
-- MANIFEST 写定后任何文件再发生变更（补拷文件、改脚本等），必须**重新生成整个元数据段并重新对账**——手写或过期的元数据与内容失实同罪。
-- **跨平台书写规范（正文与声称的适用范围必须一致）**：指导正文路径一律以 `$DSH_HOME` 变量加正斜杠书写，并给出各平台默认值。来源机器的用户名、盘符、`%APPDATA%` 等只允许出现在 MANIFEST 元数据区（供溯源），不得混入操作步骤。平台专属产物（`.cmd`、`.exe`、注册表类）标注「[Windows only]」并给出非 Windows 的等效方案或明确「非 Windows 跳过此项」。校验命令优先写语义描述（如「确认 X 存在且 hash 为 Y」「按 main/exports 解析入口可达」），由执行 agent 按所在平台自选工具。标题或正文声称「任何机器」时，逐条自检该范围内是否成立。
-- **脚本语法坑（实测）**：用 PowerShell 脚本生成 Markdown 时，**双引号字符串里的反引号会被当作转义符**，导致 Markdown 行内代码标记破坏解析甚至直接报 ParserError。含 Markdown 反引号的文本一律用**单引号**字符串，需要插值的地方用 `('模板 {0}' -f $值)`。写文件用 `[System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))` 保证 UTF-8 无 BOM。
+```bash
+$W = '<可写工作目录>'
+node bin/dsh-backup.mjs stage --work $W --categories 1,2,3,4,5,6 --include-credentials
+node bin/dsh-backup.mjs doc   --pkg $W/stage/<包名> --out $W/manifest-recovery.md
+node bin/dsh-backup.mjs pack  --pkg $W/stage/<包名> --out <交付目录>
+node bin/dsh-backup.mjs upload --file <交付目录>/dsh-backup-*.zip --url '<WebDAV 根>' --sub-dir dsh-backup
+# 凭据优先读环境变量，避免落在命令行里：DSH_WEBDAV_USER / DSH_WEBDAV_PASSWORD
+```
 
-**（c）打包后对账（防 MANIFEST 失实，必做）**
+WebDAV 要点（实测过真实 NAS）：
 
-把「MANIFEST 描述」与「staging 实际内容 + 来源环境」三方核对，高发失实点逐条查：
+- **根目录常常不接受 PUT**（返回 405），文件只能写进已存在的子目录 → 用 `--sub-dir` 指向一个已存在、可写的集合。
+- `MKCOL` 返回 405 时脚本会用 PROPFIND 复核：目录确实不存在 → 明确报错让你先建目录（服务器可能禁止建目录）。
+- 存在性一律用 PROPFIND 核 `getcontentlength`，不要用 HEAD（部分服务对 HEAD 返回 404 而文件存在）。
+- 删历史包必须 `--delete-remote <文件名>` 逐个点名；DELETE 成功是 `204`。
 
-- **相对路径结构（双向条目 diff）**：包内全部相对路径清单 vs 来源环境的实际路径清单，**两个方向的差集都必须为空**。只比「文件集合 + 内容 hash」而不比相对路径视为未完成对账——内容全对而层级错位（子目录被拍平到根）时 hash 依然一致，恢复却必然失败。
-- **插件实际安装版本**：以 `pnpm list --depth 0` 输出为准逐一核对，**semver 范围（`^x.y.z`）不得替代精确版本**；同时记录哪些依赖与官方 tarball 存在差异。
-- **bundles 字段**：如实记录「有/无 + 完整列表」，以 `dsh.profile.bundles` 实读为准。
-- **脚本绝对路径**：对每个纳入的脚本 grep 硬编码绝对路径（Windows 搜 `C:/Users/`、`C:\Users\`；macOS/Linux 搜 `/Users/`、`/home/`），记录**具体文件与行号**；用 `%~dp0`/`$PSScriptRoot`/`$(dirname)` 等相对定位的如实写「无硬编码绝对路径」。不得笼统写「内部含绝对路径」。
-- **二进制来源**：插件状态目录中的二进制要查证是「包内自带（重装即恢复）」还是「运行时下载（恢复后需联网或手动放置）」——查法：看已安装包目录里是否含该文件。**不得**写「可由 pnpm install 重装」除非确认包内自带。
-- **`file:`/`link:` 依赖的 lock 解析一致性**：读 `pnpm-lock.yaml` 中该依赖的 `specifier` 与 `version`，与 `package.json` 的声明对比。符号链接/Junction 场景下 lock 可能记录**真实目标路径**，与 specifier 不一致——此时记录「lock 中解析为 X，与 specifier Y 不一致」，并把它写进恢复验证清单。
+**staging 布局**：
 
-对账可脚本化：解压 ZIP 到固定临时目录，与 staging、与来源环境对应文件逐文件取 hash 比对；同时导出两侧相对路径清单做双向 diff。
+```text
+config/<profile>/cordis.patch.yml   用户配置层
+config/AGENTS.md
+config/skills/                      $DSH_HOME/skills
+config/agents-skills/               $DSH_AGENTS_HOME/skills
+config/project-skills/<项目>/<根>/
+config/legacy-settings/             历史遗留配置（仅溯源）
+plugins/<profile>/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,cordis.yml,compatibility.json}
+plugins/<profile>/.dsh-market/
+local-deps/<profile>/<包目录>/
+patches/                            patchscan 的 --export 产物
+patches/profile-extra/<profile>/    profile 内非标准项（补丁留档）+ PROFILE-EXTRAS.txt
+credentials/                        凭据 + CREDENTIALS-SOURCES.txt
+state/ scripts/                     顶层非标准项（目录 → state，文件 → scripts）
+data/{sessions,storages,attachments,synapse}/
+```
 
-**（d）打包与交付**
+要点：复制后立即**双向校验**（相对路径集合 + 逐文件 SHA256，不一致直接抛错）；排除 `node_modules`、缓存、`.git`、运行时生成物（`.dsh-module-fallback`、`.plugin-manager`、`thinking-effort-loaded.json`）；profile 里的补丁留档单列并逐条登记；恢复指导骨架由 `doc` 生成，agent 只补 `TODO` 处叙述。
 
-- 包名 `dsh-backup-<YYYYMMDD>-<HHMM>.zip`；计算 SHA256 与条目数。
-- **保存位置**：按通用提问规范征求，选项三个：「使用默认位置（当前工作空间）/ WebDAV / 自定义路径」。选项文案不要写任何具体目录名。
-  - 选「自定义路径」：提示用户给出完整路径，按其输入执行，不得自行假定。
-  - 选「WebDAV」：**追加一个提问环节**——询问 WebDAV 地址与凭据。**同时在默认位置（当前工作空间）保留一份本地副本**（双输出：本地 + WebDAV，WebDAV 失败时本地仍可用），并在选项说明中提示这一点。
-- **WebDAV 上传流程（实测修正）**：
-  1. 用户给的 URL 就是**目标根**，不要在其后再拼一层目录名——先确认这个根是目录还是文件前缀。
-  2. **连通性与权限探测**：`curl -s -o NUL -w "http=%{http_code}" -u <用户>:<密码> -X PROPFIND -H "Depth: 1" "<根>/"`，期望 `207`。`000` 通常是 TLS/代理/沙箱问题，不是认证失败。
-  3. **PUT 上传**：`curl -u <用户>:<密码> -T <本地文件> "<根>/<包名>"`，期望 `201`。
-  4. **存在性校验用 PROPFIND 列目录核对 `getcontentlength`**，不要依赖 `HEAD`——**实测部分 WebDAV 服务对 `-I`/HEAD 返回 `404` 而文件其实存在**，用 HEAD 判失败会误报。
-  5. **判读返回码**：MKCOL 建目录返回 `405` 通常是**该目录已存在**；DELETE 返回 **`204` 才是成功**，`404` 表示文件不存在。三者语义不同，别把「已存在 / 不存在」当成「服务不支持」而跳过操作或反复重试（实测同一服务 MKCOL 405、DELETE 204 均属正常）。
-  6. 上传后保留本地副本，并在交付信息中给出远端路径与 SHA256。
-  7. **历史包清理**：交付完成后主动检查远端是否堆积旧包（同名会被**静默覆盖**、不报错）；把清单交给用户选择保留策略，按其选择用 DELETE 清理。
-- 凭据只用于本次上传，**不得写入 MANIFEST 或任何备份文件**。
-
----
-
-## MANIFEST.md 结构（自包含，恢复方零上下文也能用）
-
-按下列顺序组织，元数据段由生成脚本产出：
-
-1. **元数据（机器生成）**：生成时间、来源机器/用户名（仅溯源）、来源 DSH / Node / pnpm 版本、包内文件数、总字节数、备份范围（含「未包含什么、为什么」）。
-2. **按六类记录**：
-   1. 配置：`settings.yaml` 的提供方、`skills/` 列表；凭据包含与否。
-   2. 插件：依赖数、**bundles 完整列表**、**各依赖实际安装精确版本表**（取自 `pnpm list`）、与官方 tarball 的对比结论。
-   3. 本地依赖：`file:`/`link:` 清单、原始路径、类型（目录/Junction/符号链接）、**完整预期目录树**（对照其 `package.json` 的 `main`/`exports`/`files`）、lock 解析一致性结论、放置要求。
-   4. 环境补丁：检测到的差异清单与备份位置（`patches/`），或「已全量对比，差异 0 项」及其证据（对比了哪些包、各多少文件、差异数）。
-   5. 脚本与状态：文件名与用途、硬编码绝对路径实测结果；**未纳入项要逐条列出「文件名 + 用途 + 恢复影响」**（不是一句「未包含」了事）；该类别若有凭据文件，同时记录来源、包内位置与恢复目标。
-   6. 数据：包含与否、各目录体积与文件数。
-3. **完整性校验值**：关键文件的字节数与 SHA256。
-4. **完整文件清单**：全部相对路径（可用 `<details>` 折叠）。
-5. **恢复执行规范 + 恢复步骤 + 恢复完成验证清单 + 全新环境引导 + 网络与代理处理 + 已知差异与常见坑**（内容见下节）。
-
-### MANIFEST 里必须包含的恢复执行规范
-
-- **提问驱动**：恢复哪些类别、冲突处理、覆盖/保留/合并、路径重写、凭据、是否升级 DSH——每个决策点都提问给选项；其它环境用等效机制或文本选项（如「A/B/C，回复编号或名称」）。
-- **保守默认**：覆盖已有文件前确认；不删除目标机器任何未涉及文件；凭据只用于恢复。
-- **每步验证**：安装后验证版本、放置后验证存在、补丁应用后验证在位。
-- **解压到固定绝对路径**：勿用临时目录（不同权限下解析值不同，切换权限后路径失联）。
-
-### MANIFEST 里必须包含的恢复步骤骨架
-
-1. 目标环境检测与引导（已有环境核对版本；无 Node 走「全新环境引导」）。
-2. 解压并按清单放置配置/技能/凭据。
-3. **先放本地依赖再装插件**：`file:`/`link:` 依赖落盘 → 需要时改 `package.json` 里的路径 → 建立链接/符号链接 →（项目若有幂等修复脚本，如「重建 Junction + 把插件重新登记进 `package.json` 的 dependencies 与 bundles」这类脚本，优先跑脚本而不是手工改 JSON）。
-4. 重装插件：`cd profiles/web && pnpm install`（构建脚本被拦截则 `pnpm approve-builds --all`；源不可达先按「网络与代理处理」配置）。**目标机器正在运行 `dsh web` 且插件含 Electron/vendor 二进制时，pnpm 因文件被进程映射报 `ERR_PNPM_EPERM`——先停 GUI 或切网页模式再装。**
-5. 环境补丁：按 `patches/` 重新应用（运行层覆盖/注入、插件包内覆盖），并提示「官方升级会覆盖，需保留本清单以重应用」。
-6. 插件状态与脚本就位；运行时下载的二进制确认就位或可联网获取。
-7. 数据还原（**覆盖前确认**；提示 sessions 里记录的工作区路径在新机器上可能不同）。
-8. 环境适配：绝对路径重写、代理脚本依赖、本地代理依赖说明、API 密钥走环境变量（密钥本身通常不在包内）。
-9. 启动 `dsh web` 验证 + 硬刷新浏览器。
-
-### MANIFEST 里必须包含的验证清单
-
-- `dsh --version` 与来源版本一致（或按用户决策的现有版本）。
-- `pnpm list --depth 0` 的实际安装版本与 MANIFEST 表格**逐一一致**。
-- **`file:`/`link:` 依赖实际解析路径与 MANIFEST 记录一致**（未被 lock 里的旧路径带偏）。
-- **入口可达**：按其 `package.json` 的 `main`/`exports` 实际解析一次入口（`require.resolve` / `import.meta.resolve` / 逐项确认 exports 目标文件存在），并核对目录层级与 MANIFEST 预期目录树一致。**文件 hash 一致不代表层级正确，以入口可达为准。**
-- 补丁在位（若包内有 `patches/`）。
-- 插件状态就位、运行时二进制就位。
-- `dsh web` 启动、GUI 可访问；异常则重启进程并硬刷新（Ctrl+Shift+R）。
-- **恢复前创建的旧会话可能看不到新插件工具**——会话投影缓存旧，新建会话或硬刷新后生效，属正常现象，不必重装。
-
-### MANIFEST 里必须包含的全新环境引导
-
-- 检测顺序：`node --version` → `dsh --version` → `pnpm --version`（corepack 未启用时 `corepack pnpm --version`）。
-- 安装 Node：Windows `winget install OpenJS.NodeJS.LTS`（或 https://nodejs.org 安装包）；macOS `brew install node`；Linux `sudo apt-get install -y nodejs npm` 或 nvm。
-  - **版本下限**：pnpm 11 及以上要求 **Node 22+**；通过 npm 安装 pnpm 12 需 **Node 22.13+**；DSH 依赖的 `node:zlib` zstd 能力需要 Node 22.19+。综合取 **Node 22.19 或更新版本**最稳妥。
-- 启用 pnpm：`corepack enable pnpm`；corepack 联网拉取失败则 `npm install -g pnpm`。
-- 安装 DSH：`npm install -g @deepseek-ai/dsh@<来源版本>`（按来源版本安装，不要默认取 latest）。
-- 每步安装后验证版本再继续。
-
-### MANIFEST 里必须包含的网络与代理处理
-
-- pnpm：`pnpm config set proxy http://<代理主机:端口>`、`pnpm config set https-proxy http://<代理主机:端口>`。
-- npm：`npm config set proxy http://<代理主机:端口>`、`npm config set https-proxy http://<代理主机:端口>`。
-- 国内镜像：给 npm/pnpm 都加 `--registry https://registry.npmmirror.com`。
-- 注意 pnpm 11+ 起 `.npmrc` 只保留 registry/auth 配置，其余设置要写在 `pnpm-workspace.yaml` 或全局 `config.yaml`。
-- GitHub 直连依赖不可达时：配置代理、改用镜像，或手动放置源码后改成 `link:` 本地依赖。
+`pack` 必然做：写 `manifest.json` → 渲染 `MANIFEST.md` → 打 ZIP → **解压回读双向对账**（缺失/多余/不一致都必须为 0）→ 写 `<zip>.sha256`。对账不过退出 20，不产出可交付包。
 
 ---
 
@@ -254,60 +169,61 @@ pwsh -File "$A/pack-final.ps1"      -WorkDir $Work -OutputDir '<交付目录>'
 
 ### 1. 目标环境检测
 
-- 检测链：`node --version` → `dsh --version` → `pnpm --version`。
-- 已有环境但 `dsh --version` 与 MANIFEST 来源版本不一致：**提问**——升级（可能影响现有配置、需重装插件）或按现有版本继续（部分插件可能不兼容）。
-- 全新机器（无 Node）：按 MANIFEST「全新环境引导」安装，每步验证版本。
-- `$DSH_HOME` 状态：全新 / 已有配置。
-- 读取备份包内 `MANIFEST.md`，解压到**固定绝对路径**。
+检测链 `node --version`（必须 22.19+）→ `dsh --version` → `pnpm --version`；读包内 `manifest.json`（没有就由目录推导），解压到**固定绝对路径**。目标 DSH 与来源不同 → 进 `decisions[]`，先问用户。
 
-### 2. 对比与取舍（按六类逐项提问）
+### 2. 对比与取舍
 
-- 1 配置冲突：目标已有值 vs 包内值 → 覆盖 / 保留 / 合并。
-- 2 插件差异：数量（多/少）、实际安装精确版本、包内文件是否被改（核 `patches/` 记录项的 hash；registry 包重装后文件可能回退官方版而版本号不变）→ 说明差异由用户决定是否对齐。
-- 3 本地依赖：目标缺失 → 放置或改路径。
-- 4 环境补丁：目标是否已有相同修改（检测方法同备份，粒度与备份时一致）→ 已有则跳过/覆盖；没有则应用，并提示「官方升级会覆盖，需保留补丁记录」。
-- 5 脚本与状态：放置 + 依赖适配（如代理脚本的依赖）；插件登录态恢复以免重新初始化；运行时下载的二进制确认就位或可联网。
-- 6 数据：可选恢复，**覆盖前确认**。
-- 环境适配（逐项确认）：绝对路径重写、代理脚本 `require` 路径重写、本地代理依赖说明、GitHub 依赖源不可达时的处理。
+```bash
+node bin/dsh-backup.mjs plan --pkg '<解压后的包>' --out plan.json
+```
+
+`plan.json` 给出：配置层**新增 / 冲突 / 仅目标有**、技能逐条 `add|update|same`、凭据逐条状态、本地依赖 spec 改写、补丁是否已生效、数据文件数，以及 `decisions[]`（凭据、数据、DSH 版本差异）。逐项问用户，选择通过 `--include-credentials` / `--restore-data` / `--strategy` 回到计划。
 
 ### 3. 恢复执行
 
-按用户选择逐一执行：环境引导（若需）→ 路径/环境适配 → 放置本地依赖源码 → 建立链接 → 重装插件（`pnpm install`，**GUI 运行中会 `ERR_PNPM_EPERM`，先停 GUI**）→ 应用补丁 → 插件状态与脚本 → 数据 → 凭据（若含且确认）。每完成一项汇报。
+```bash
+node bin/dsh-backup.mjs apply --plan plan.json            # dry-run
+node bin/dsh-backup.mjs apply --plan plan.json --apply    # 真正执行
+```
+
+顺序（脚本强制）：**配置层按 id 合并 → 技能 → 凭据 → 本地依赖落盘并改写 spec → 安装插件 → 补丁 → 脚本与状态 → 数据**。覆盖前改名 `.bak-<时间戳>`；插件走 `dsh plugin --profile <名> install`（GUI 运行中会 `ERR_PNPM_EPERM`，先停 GUI）；凭据落盘后收紧到 0600。
 
 ### 4. 验证
 
-按 MANIFEST 的「恢复完成验证清单」逐项核对，重点是**目录层级与入口可达**（`file:`/`link:` 依赖按 `main`/`exports` 实际解析一次）；提示重启 `dsh web` 并硬刷新浏览器。
+```bash
+node bin/dsh-backup.mjs verify --pkg '<解压后的包>' --out verify.md
+```
+
+核对：bundles 覆盖与依赖已安装、**包内每条 entry id 都在目标且 hash 一致**、技能名在位、凭据 hash、补丁 hash、本地依赖已链接、数据文件数。失败退出码 20。再人工补核入口可达与 `dsh web` 可访问。
 
 ---
 
 ## 常见坑
 
-一句话定位：**症状 → 处置**。展开步骤见对应章节，这里只给判据。
+### 备份端
 
-### 备份端（会导致包不可用或记录失实）
+- **用户配置被当成不存在**——配置只在 `profiles/<名>/cordis.patch.yml`。
+- **只处理一个 profile**——静默漏掉其余 profile。
+- **技能根漏扫**——漏 `$DSH_AGENTS_HOME/skills` 与项目级；漏单文件 `<名字>.md`。
+- **忽略 profile 里的补丁留档**——如 `dsh-ops-patch-<日期>/`。
+- **子目录被拍平**——执行器用「相对路径集合 + 逐文件 hash」兜住；自定义脚本照做。
+- **MANIFEST 手写或过期**——数字必须由 `pack` 实测生成。
+- **记录不完整**——未纳入项要写「文件名 + 用途 + 恢复影响」。
+- **运行时可变状态混进快照**——插件写回 `cordis.patch.yml`（窗口坐标等）；判断性质后重跑 `pack`。
+- **WebDAV 用 HEAD 判存在**——部分服务返回 404 而文件存在；一律用 PROPFIND 核 `getcontentlength`。
 
-- **子目录被静默拍平**——`Get-ChildItem -Recurse | Copy-Item -Destination <目标>` 的管道写法会丢失层级；文件与 hash 全对，但相对路径错位，恢复时 `main`/`exports` 解析必然失败。用 `Copy-Item -Recurse` / `cp -a`，每次复制后比对目录树。
-- **MANIFEST 元数据过期或手写**——字节数/时间戳/hash 与实际内容不同步时，严格对账的恢复方必然判失实。元数据只在打包最后一步机器生成；内容再变（补拷文件、改脚本、改技能）就**重新生成整个元数据段并重新对账**。
-- **MANIFEST 记录不完整**——未纳入项没有逐条写清「文件名 + 用途 + 恢复影响」时，恢复方会误判（把「无 bundles」当真而漏配激活、把「无绝对路径」当真而不改路径、把「可重装」当真而漏放二进制）。凭据文件尤其致命：漏登记等于恢复方**不知道它存在**，插件功能缺失却查不出原因。
-- **把「用户说可以下载」当成「确实能下载」**——能否重装必须以逐文件对比结论为准；有差异就必须打包差异文件并标注恢复办法。
-- **运行时可变状态混进快照**——插件会把运行时状态写回 `settings.yaml` 等配置（实测：桌面宠物插件写回 `desktopX`/`desktopY` 窗口坐标）。表现为「打包时快照」与「对账时再读到」的 hash 不一致。处置：先判断差异性质（纯 UI 状态可接受，影响功能的字段要问用户），再刷新快照 → 重新生成元数据段 → 重新对账，并在 MANIFEST 的「已知差异」里注明该文件属运行时可变状态。
-- **凭据被静默漏掉**——默认不打包 + 记录不全的组合最危险：包内文档只提 `.credentials.yaml`，而第三方登录态（如 `.openai-codex-auth.json`）既没进包也没登记。对策见「凭据类文件的处置」。
-- **远端历史包堆积**——反复备份会把同目录塞满历史包，且同名包会被**覆盖**（远端不报错）。每次交付后主动询问是否清理旧包，并给出清单让用户选择保留策略。
-- **WebDAV 校验方式误判**——部分服务对 `HEAD` 返回 404 而文件其实存在；`MKCOL`/`DELETE` 的支持度视服务而定（实测同一服务 MKCOL 405、DELETE 204）。存在性一律用 **PROPFIND 列目录核对 `getcontentlength`**，不要依赖 HEAD 判成败。
+### 恢复端
 
-### 恢复端（会导致恢复失败）
-
-- **`file:`/`link:` 本地依赖源码缺失或层级错误**——这类依赖无法从任何源下载；层级错了 pnpm 不报错，直到运行时按 exports 解析才失败。放置后必须做「入口可达」验证。
-- **在 `pnpm install` 之后才放本地依赖**——顺序反了会解析失败。必须先放置（必要时改路径/链接）再安装。
-- **补丁被官方升级覆盖**——补丁记录要保留、恢复后重新应用；若项目用插件形式承载同类修改，恢复时先确认该插件已登记进 bundles。
-- **凭据放错位置或缺失**——凭据文件在包内的 `credentials/` 只是分类，恢复目标以 MANIFEST 逐条标注为准（可能落在 `$DSH_HOME` 根目录）；另外 API 密钥通常走**环境变量**，即使凭据文件随包恢复，新机器仍须设置环境变量。
-- **`pnpm install` 报 `ERR_PNPM_EPERM`**——插件含 Electron/vendor 二进制且 `dsh web` GUI 正在运行（文件被进程映射）；先停 GUI 或切网页模式。
-- **`file:` 依赖被 `pnpm-lock.yaml` 旧路径带偏**——符号链接/Junction 场景下 lock 记录的是真实目标；恢复后核对实际解析路径，必要时修正 lock。
-- **运行时下载的二进制未就位**——`pnpm install` 不会重装它（如 `cloudflared.exe`）；恢复后需联网自动下载或手动放置，网络受限时该功能不可用。
-- **数据目录被无声覆盖**——`sessions`/`storages`/`attachments` 在目标机器可能已有数据，覆盖前必须确认；另注意 sessions 里记录的工作区路径在新机器上可能不同。
-- **旧会话看不到新插件工具**——会话投影缓存旧，新建会话或硬刷新后生效，不是安装失败。
-- **全新机器安装链断裂**——无 Node 或源不可达时按「全新环境引导」与「网络与代理处理」逐步验证，不要跳步；注意 Node 版本下限（pnpm 11+ 需 Node 22+，DSH 的 zstd 需 22.19+）。
+- **整文件覆盖 `cordis.patch.yml`**——抹掉目标自有条目；必须按 id 合并。
+- **先装插件后放本地依赖**——顺序反了解析失败。
+- **`file:`/`link:` 层级错误**——pnpm 不报错，运行时才失败；要验入口可达。
+- **凭据放错位置**——包内 `credentials/` 只是分类，目标是 `$DSH_HOME` 根。
+- **`engines.dsh` 不兼容**——阻止安装/激活；换版本或授豁免。
+- **跨版本覆盖数据**——先确认数据格式兼容。
+- **`ERR_PNPM_EPERM`**——先停 GUI。
+- **全新机器**——先装 Node 22.19+ 再装 DSH，不要跳步。
 
 ### 指导撰写
 
-- **声称跨平台却平台特化**——正文硬编码 `C:\Users\<用户>`、`%APPDATA%`、`.cmd` 会让其他平台的执行 agent 卡住或误执行；路径统一用 `$DSH_HOME`，平台专属项显式标注并给等效方案或「跳过」说明。
+- **声称跨平台却平台特化**——路径统一用 `$DSH_HOME`，平台专属项标注并给等效方案。
+- **把叙述当数字**——能由 `manifest.json` 渲染的就不要手写。

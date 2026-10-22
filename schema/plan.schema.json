@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/little3tar/dsh-backup/schema/plan.schema.json",
+  "title": "dsh-backup restore plan",
+  "description": "恢复时由 plan 子命令生成、apply 子命令消费的计划。可存档、可 diff、可重放。",
+  "type": "object",
+  "required": ["schemaVersion", "package", "target", "steps", "decisions", "changes", "summary"],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "createdAt": { "type": "string" },
+    "package": {
+      "type": "object",
+      "required": ["dir"],
+      "properties": { "dir": { "type": "string" }, "schemaVersion": { "type": "string" }, "generator": { "type": "object" }, "source": { "type": "object" }, "scope": { "type": "object" } }
+    },
+    "target": {
+      "type": "object",
+      "required": ["home", "agentsHome"],
+      "properties": { "home": { "type": "string" }, "agentsHome": { "type": "string" }, "dsh": { "type": ["string", "null"] }, "platform": { "type": "string" }, "stamp": { "type": "string" } }
+    },
+    "strategy": { "enum": ["merge", "overwrite", "skip"] },
+    "includeCredentials": { "type": "boolean" },
+    "restoreData": { "type": "boolean" },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["op"],
+        "properties": {
+          "op": { "enum": ["merge-config", "copy-skills", "copy-credentials", "copy-local-deps", "install-plugins", "apply-patches", "copy-state", "restore-data"] },
+          "skipped": { "type": "boolean" }
+        }
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": { "type": "object", "required": ["id", "question"], "properties": { "id": { "type": "string" }, "question": { "type": "string" }, "options": { "type": "array", "items": { "type": "string" } }, "default": { "type": "string" } } }
+    },
+    "changes": { "type": "array", "items": { "type": "object" } },
+    "summary": {
+      "type": "object",
+      "required": ["changes", "decisions", "steps"],
+      "properties": { "changes": { "type": "number" }, "decisions": { "type": "number" }, "steps": { "type": "number" } }
+    }
+  }
+}
