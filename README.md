@@ -31,7 +31,7 @@ node bin/dsh-backup.mjs detect --json --out env.json
 node bin/dsh-backup.mjs size --work ./w
 node bin/dsh-backup.mjs patchscan --work ./w --export ./w/patches
 node bin/dsh-backup.mjs patchscan --work ./w --registry https://registry.npmmirror.com   # registry fallback
-node bin/dsh-backup.mjs stage --work ./w --categories 1,2,3,4,5,6 --include-credentials
+node bin/dsh-backup.mjs stage --work ./w --categories 1,2,3,4,5,6 --include-credentials   # 含类别 4 时自动 patchscan
 node bin/dsh-backup.mjs doc  --pkg ./w/stage/<包名> --out ./w/manifest-recovery.md
 node bin/dsh-backup.mjs pack --pkg ./w/stage/<包名> --out ./out
 DSH_WEBDAV_USER=... DSH_WEBDAV_PASSWORD=... node bin/dsh-backup.mjs upload --file ./out/*.zip --url '<WebDAV 根>' --sub-dir Backup

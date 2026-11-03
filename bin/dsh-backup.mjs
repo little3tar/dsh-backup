@@ -10,8 +10,9 @@ import path from 'node:path'
 import fs from 'node:fs'
 import {
   EXIT, AppError, log, diag, emitJson, parseArgs, splitList, resolveHome, resolveAgentsHome,
-  exists, readText, writeJson, fmtSize,
+  exists, readText, writeText, writeJson, fmtSize, stampNow,
 } from '../lib/core.mjs'
+import { ic } from '../lib/manifest.mjs'
 import { detect, renderDetect, size as measureSize, stage, listProfileDirs, verifyStaging } from '../lib/backup.mjs'
 import { doc, pack, patchscan, upload } from '../lib/artifact.mjs'
 import { plan, apply, verify, renderPlan } from '../lib/restore.mjs'
@@ -27,7 +28,11 @@ const COMMANDS = {
   },
   stage: {
     summary: '按六类建 staging（复制后立即校验）',
-    args: { work: 'string', name: 'string', categories: 'string', 'include-credentials': 'bool', profile: 'list', project: 'list', 'exclude-top': 'list', 'extra-top': 'list', 'exclude-profile-extra': 'list' },
+    args: {
+      work: 'string', name: 'string', categories: 'string', 'include-credentials': 'bool',
+      profile: 'list', project: 'list', 'exclude-top': 'list', 'extra-top': 'list', 'exclude-profile-extra': 'list',
+      'no-patchscan': 'bool', 'patchscan-offline': 'bool', 'patchscan-export': 'bool', registry: 'list',
+    },
   },
   doc: {
     summary: '生成恢复指导（manifest-recovery.md）',
@@ -119,12 +124,42 @@ async function main(argv) {
     const work = resolveWork(opts.work)
     const categories = splitList(opts.categories)
     const cats = categories.length ? categories : ['1', '2', '3', '4', '5', '6']
+    const profiles = splitList(opts.profile).length ? splitList(opts.profile) : listProfileDirs(home)
+
+    // 类别 4：先把「已安装插件被改」的真实补丁扫出来导出到 <work>/patches。
+    // 否则 stage 只能收到 profile 目录里的留档，被改的 node_modules 文件会静默漏掉。
+    if (cats.includes('4') && !opts['no-patchscan']) {
+      const doExport = Boolean(opts['patchscan-export'])
+      const patDir = path.join(work, 'patches')
+      const ownMark = path.join(patDir, 'profile-extra', 'PATCHSCAN.md')
+      // 上一次自动扫描的产物先清掉（用户手工导出的 patches/ 不归我们管）
+      if (exists(ownMark)) fs.rmSync(patDir, { recursive: true, force: true })
+      try {
+        log('=== 4 插件补丁扫描（与官方 tarball 逐文件对比）===')
+        const scan = patchscan({
+          home, profiles, workDir: path.join(work, 'patchscan'), exportDir: doExport ? patDir : null,
+          offline: Boolean(opts['patchscan-offline']), registries: splitList(opts.registry),
+        })
+        writeText(path.join(patDir, 'profile-extra', 'PATCHSCAN.md'), renderScanNote(scan))
+        if (scan.conclusion === 'all-clean') log('[scan] 插件与官方发布包逐文件一致：无需补丁')
+        else {
+          const n = scan.results.reduce((a, r) => a + r.modified.length + r.onlyOfficial.length, 0)
+          const pk = scan.results.filter(r => r.modified.length || r.onlyOfficial.length).length
+          log('[scan] ' + pk + ' 个包 / ' + n + ' 个文件与官方 tarball 不同（详见 patches/profile-extra/PATCHSCAN.md）')
+          if (doExport) log('[scan] 已导出 ' + scan.exported.length + ' 项到 patches/（恢复时会覆盖对应文件，请先逐项判定）')
+          else log('[scan] 未导出；确认是真补丁后重跑并加 --patchscan-export')
+        }
+      } catch (e) {
+        diag('[WARN] 插件补丁扫描失败：' + e.message + '（继续打包；跳过加 --no-patchscan，离线用 --patchscan-offline）')
+      }
+    }
+
     const result = stage({
       home, agentsHome, workDir: work,
       packageName: opts.name ?? 'dsh-backup-' + new Date().toISOString().slice(0, 10).replace(/-/g, ''),
       categories: cats,
       includeCredentials: Boolean(opts['include-credentials']),
-      profiles: splitList(opts.profile).length ? splitList(opts.profile) : listProfileDirs(home),
+      profiles,
       excludeTopLevel: splitList(opts['exclude-top']),
       extraTopLevel: splitList(opts['extra-top']),
       excludeProfileExtra: splitList(opts['exclude-profile-extra']),
@@ -238,6 +273,33 @@ async function main(argv) {
   }
 
   throw new AppError('未实现的子命令：' + cmd, EXIT.ERROR)
+}
+
+/** patchscan 结果说明（放进包内 patches/profile-extra/，只作留档，不自动应用） */
+function renderScanNote(scan) {
+  const L = ['# 插件补丁扫描（patchscan）', '',
+    '- 时间：' + stampNow(),
+    '- 结论：' + (scan.conclusion === 'all-clean' ? '**与官方发布包逐文件一致，无补丁**' : '**发现被改文件，已导出到 patches/ 下**'),
+    '- 导出：' + scan.exported.length + ' 项', '']
+  if (scan.exported.length) {
+    L.push('| profile | 包 | 版本 | 文件 |', '|---|---|---|---|')
+    for (const x of scan.exported) L.push('| ' + x.profile + ' | ' + x.package + ' | ' + x.version + ' | ' + ic(x.rel) + ' |')
+    L.push('')
+  }
+  const diffs = scan.results.filter(r => r.modified.length || r.onlyOfficial.length)
+  if (diffs.length) {
+    L.push('## 差异概览', '')
+    for (const r of diffs) L.push('- [' + r.profile + '] ' + r.package + '@' + r.version + '：被改 ' + r.modified.length + '，官方有本地无 ' + r.onlyOfficial.length)
+    L.push('')
+  }
+  const regs = Object.entries(scan.registryUsed || {})
+  if (regs.length) {
+    L.push('## tarball 来源', '')
+    for (const [k, v] of regs) L.push('- ' + k + ' ← ' + v)
+    L.push('')
+  }
+  L.push('> 恢复时 ' + ic('patches/profile-extra/') + ' 下的内容不自动应用，仅作留档。')
+  return L.join('\n') + '\n'
 }
 
 /** --work 时从 <work>/stage 下取第一个包目录 */

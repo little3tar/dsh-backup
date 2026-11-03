@@ -29,7 +29,7 @@ description: >
 | 1 | **配置** | 每个 profile 的**用户配置层** `profiles/<名>/cordis.patch.yml`；`AGENTS.md`；5 处技能根下的技能；顶层凭据类文件 | `detect`：读文件、列目录；统计 patch 层 `- id:` 条目数；技能**两种形态都认** |
 | 2 | **插件** | 逐 profile：`package.json`（依赖 + `dsh.profile.bundles`）、lock、workspace、`cordis.yml`、`compatibility.json`、**精确安装版本** | `pnpm list --depth 0 --json`，取不到回退读 `node_modules/<包>/package.json` |
 | 3 | **本地依赖** | `file:`/`link:` 指向的源码目录 | 解析声明、确认目录/Junction/符号链接、记录真实目标 |
-| 4 | **环境补丁** | ① 源码未提交改动 ② 部署层被改文件 ③ **插件包内文件被改** ④ profile 里的补丁留档 | ①② 看 `detect` 线索；③ `patchscan` 逐文件比官方 tarball；④ profile 非标准项枚举 |
+| 4 | **环境补丁** | ① 源码未提交改动 ② 部署层被改文件 ③ **插件包内文件被改** ④ profile 里的补丁留档 | ①② 看 `detect` 线索；③ `stage` 自动跑 `patchscan`（也可单独跑）逐文件比官方 tarball；④ profile 非标准项枚举 |
 | 5 | **脚本、目录与插件状态** | `$DSH_HOME` 顶层非标准项；插件运行时数据 | 列顶层全部条目；二进制须**查证来源** |
 | 6 | **数据** | `sessions/`、`storages/`、`synapse/`、`attachments/v1/` | 体积与文件数 + **数据格式版本** |
 
@@ -60,7 +60,7 @@ description: >
 |---|---|---|
 | `detect` | 否 | 六类只读盘点 → Markdown / `--json` |
 | `size` | 只写探测 ZIP | 文件数 / 原始体积 / 压缩后 / 压缩率 / 耗时 |
-| `stage` | 写 staging | 按六类复制，每类复制后立即双向校验 |
+| `stage` | 写 staging | 按六类复制，每类复制后立即双向校验；**含类别 4 时自动先跑 `patchscan`**，把「已安装插件被改」的真补丁导出进 `patches/`（默认**只报告不导出**；`--patchscan-export` 才导出、`--no-patchscan` 跳过、`--patchscan-offline` 不下载） |
 | `doc` | 是 | 生成恢复指导骨架 |
 | `pack` | 是 | 写 `manifest.json` + `MANIFEST.md` → ZIP → **解压回读对账** |
 | `patchscan` | 是（下载） | 逐 profile 与官方 tarball 逐文件 SHA256 对比；`--export` 导出差异；**registry 失败自动 fallback**（默认 npm 配置 → npmmirror → npmjs，也可 `--registry` 显式给链） |
@@ -152,14 +152,15 @@ config/legacy-settings/             历史遗留配置（仅溯源）
 plugins/<profile>/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,cordis.yml,compatibility.json}
 plugins/<profile>/.dsh-market/
 local-deps/<profile>/<包目录>/
-patches/                            patchscan 的 --export 产物
+patches/                            patchscan 导出的可应用补丁（stage 自动生成）
+patches/profile-extra/PATCHSCAN.md 扫描结论与差异概览（留档，不自动应用）
 patches/profile-extra/<profile>/    profile 内非标准项（补丁留档）+ PROFILE-EXTRAS.txt
 credentials/                        凭据 + CREDENTIALS-SOURCES.txt
 state/ scripts/                     顶层非标准项（目录 → state，文件 → scripts）
 data/{sessions,storages,attachments,synapse}/
 ```
 
-要点：复制后立即**双向校验**（相对路径集合 + 逐文件 SHA256，不一致直接抛错）；排除 `node_modules`、缓存、`.git`、运行时生成物（`.dsh-module-fallback`、`.plugin-manager`、`thinking-effort-loaded.json`）；profile 里的补丁留档单列并逐条登记；恢复指导骨架由 `doc` 生成，agent 只补 `TODO` 处叙述。
+要点：复制后立即**双向校验**（相对路径集合 + 逐文件 SHA256，不一致直接抛错）；排除 `node_modules`、缓存、`.git`、运行时生成物（`.dsh-module-fallback`、`.plugin-manager`、`thinking-effort-loaded.json`）；profile 里的补丁留档单列并逐条登记；**类别 4 会先自动跑 `patchscan`**（结果写进 `patches/profile-extra/PATCHSCAN.md`，真补丁按 `patches/<profile>/node_modules/<包>/<相对路径>` 导出，扫描失败只告警不中断）；恢复指导骨架由 `doc` 生成，agent 只补 `TODO` 处叙述。
 
 `pack` 必然做：写 `manifest.json` → 渲染 `MANIFEST.md` → 打 ZIP → **解压回读双向对账**（缺失/多余/不一致都必须为 0）→ 写 `<zip>.sha256`。对账不过退出 20，不产出可交付包。
 
@@ -206,6 +207,7 @@ node bin/dsh-backup.mjs verify --pkg '<解压后的包>' --out verify.md
 - **只处理一个 profile**——静默漏掉其余 profile。
 - **技能根漏扫**——漏 `$DSH_AGENTS_HOME/skills` 与项目级；漏单文件 `<名字>.md`。
 - **忽略 profile 里的补丁留档**——如 `dsh-ops-patch-<日期>/`。
+- **把「官方 tarball 与已安装包不一致」直接当成补丁**——同一插件在不同 profile 可能是**不同版本**；解压官方包时若按包名共用目录，旧版本残留文件会让新版本凭空多出几十个「差异」（实测 55 个假补丁）。必须按 `包名@版本` 隔离解压，并隔一段时间重算 hash 排除运行时自动重写的产物（`volatile`），确认后才 `--patchscan-export`。
 - **子目录被拍平**——执行器用「相对路径集合 + 逐文件 hash」兜住；自定义脚本照做。
 - **MANIFEST 手写或过期**——数字必须由 `pack` 实测生成。
 - **记录不完整**——未纳入项要写「文件名 + 用途 + 恢复影响」。
