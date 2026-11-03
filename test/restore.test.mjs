@@ -61,7 +61,7 @@ test('plan：识别新增/冲突/仅目标有', () => {
   assert.deepEqual(merge.added, ['new-one'])
   assert.deepEqual(merge.replaced, ['conflict'])
   assert.deepEqual(merge.kept, ['only-target'])
-  assert.deepEqual(merge.conflicts, ['conflict'])
+  assert.deepEqual(merge.conflicted, ['id:conflict'])
   const cred = pl.steps.find(s => s.op === 'copy-credentials')
   assert.equal(cred.skipped, true)
   assert.ok(pl.decisions.some(d => d.id === 'credentials'))

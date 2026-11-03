@@ -43,7 +43,7 @@ description: >
 
 | 规则 | 内容 |
 |------|------|
-| **用户配置只在 patch 层** | `profiles/<名>/cordis.patch.yml` 是顶层 YAML 数组，元素为 loader patch entry，**在全部 bundle 层之后应用**且热加载。`cordis.yml` 只是空入口清单。恢复**按 entry `id` 合并**，绝不整文件覆盖 |
+| **用户配置只在 patch 层** | `profiles/<名>/cordis.patch.yml` 是顶层 YAML 数组，元素为 loader patch entry，**在全部 bundle 层之后应用**且热加载。`cordis.yml` 只是空入口清单。恢复**按 entry 的 key 合并**，绝不整文件覆盖：`override` 用 `id`（`- id: foo # 注释` 的 id 就是 `foo`，注释会被 YAML 丢弃），`insert:` 列表用**被插入条目的 `id` 集合**识别 |
 | **profile 固定清单** | `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.yml`、`cordis.patch.yml`、`compatibility.json`、`.dsh-market/`、`node_modules/`；其余都是「非标准项」 |
 | **DSH CLI** | `dsh [--profile] <名>`；`dsh plugin --profile <名> <pnpm 参数…>`（首次使用初始化 profile，**已存在文件一律不动**）；`--from-default-profile` 会**覆盖**；`--dump-config` 核对组合结果 |
 | **插件版本兼容** | 插件 `engines.dsh`（无则看 `\@deepseek-ai/dsh*` peer）不满足时**阻止安装与激活**；补救是换版本或 `dsh plugin allow-version` 授精确版本豁免（先告知风险） |
@@ -194,7 +194,7 @@ node bin/dsh-backup.mjs apply --plan plan.json --apply    # 真正执行
 node bin/dsh-backup.mjs verify --pkg '<解压后的包>' --out verify.md
 ```
 
-核对：bundles 覆盖与依赖已安装、**包内每条 entry id 都在目标且 hash 一致**、技能名在位、凭据 hash、补丁 hash、本地依赖已链接、数据文件数。失败退出码 20。再人工补核入口可达与 `dsh web` 可访问。
+核对：bundles 覆盖与依赖已安装、**包内每条 entry 的 key（override 的 id / insert 的被插入 id 集合）都在目标且 hash 一致**、技能名在位、凭据 hash、补丁 hash、本地依赖已链接、数据文件数。失败退出码 20。再人工补核入口可达与 `dsh web` 可访问。
 
 ---
 

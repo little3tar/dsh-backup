@@ -6,7 +6,7 @@
 
 ## 为什么是这个形态
 
-- **契约用 JSON**：可被 schema 校验、可结构化合并（配置层按 entry `id`）、可 diff、可重放。YAML 只作为**载荷**原样搬运，不参与格式转换。
+- **契约用 JSON**：可被 schema 校验、可结构化合并（配置层按 entry key：override 的 `id`、`insert:` 列表的被插入 `id` 集合）、可 diff、可重放。YAML 只作为**载荷**原样搬运，不参与格式转换。
 - **执行器用 Node**：DSH 自身要求 Node ≥ 22.19，「能跑 DSH 的机器必然有 Node」，所以它不是额外依赖。一份 `.mjs` 三端同跑，零第三方依赖。
 - **计划与执行分离**：`plan` 只读地产出 `plan.json`，agent 审阅后 `apply --apply` 才写盘，覆盖前一律 `.bak-<时间戳>`。
 

@@ -55,21 +55,44 @@ test('合并：目标不存在时用包内 header 新建', () => {
   assert.equal(r.added.length, 2)
 })
 
-test('合并：无 id 条目默认只保留目标侧', () => {
+test('合并：无法识别 key 的行按内容指纹合并（同内容不重复追加）', () => {
   const tgt = '- name: plain\n  config:\n    a: 1\n'
   const src = '- name: other\n  config:\n    b: 2\n'
   const r = mergePatch({ targetText: tgt, sourceText: src })
   assert.equal(r.text.includes('plain'), true)
-  assert.equal(r.text.includes('other'), false)
-  assert.equal(r.unkeyedAdded, 0)
+  assert.equal(r.text.includes('other'), true)
+  const again = mergePatch({ targetText: r.text, sourceText: src })
+  assert.equal(again.unchanged, true)
 })
 
-test('合并：appendUnkeyed 才追加包内无 id 条目', () => {
-  const tgt = '- name: plain\n  config:\n    a: 1\n'
-  const src = '- name: other\n  config:\n    b: 2\n'
-  const r = mergePatch({ targetText: tgt, sourceText: src, appendUnkeyed: true })
-  assert.equal(r.text.includes('other'), true)
-  assert.equal(r.unkeyedAdded, 1)
+test('解析：id 带行尾注释也能识别（DSH 解析时会丢弃注释）', () => {
+  const t = ['- id: agent-default-model # magpie', '  config:', '    a: 1'].join('\n') + '\n'
+  const p = parsePatch(t)
+  assert.equal(p.entries.length, 1)
+  assert.equal(p.entries[0].kind, 'override')
+  assert.equal(p.entries[0].id, 'agent-default-model')
+  assert.equal(p.entries[0].key, 'id:agent-default-model')
+  assert.equal(p.unkeyed.length, 0)
+})
+
+test('解析：insert 列表整体是一个条目，按被插入 id 识别', () => {
+  const t = ['- insert: # magpie', '    - id: magpie-mcp-abb-rws', '      name: "@deepseek-ai/dsh-mcp-client"', '      config:', '        transport: stdio'].join('\n') + '\n'
+  const p = parsePatch(t)
+  assert.equal(p.entries.length, 1)
+  assert.equal(p.entries[0].kind, 'insert')
+  assert.deepEqual(p.entries[0].insertIds, ['magpie-mcp-abb-rws'])
+  assert.equal(p.entries[0].key, 'insert:magpie-mcp-abb-rws')
+  assert.equal(p.unkeyed.length, 0)
+})
+
+test('合并：insert 条目不会重复叠加，目标独有 insert 保留', () => {
+  const src = '- insert: # a\n    - id: m1\n      name: x\n'
+  const tgt = '- insert: # b\n    - id: m2\n      name: y\n'
+  const r = mergePatch({ targetText: tgt, sourceText: src })
+  assert.deepEqual(r.inserts, ['insert:m1'])
+  assert.deepEqual(r.kept, ['insert:m2'])
+  const again = mergePatch({ targetText: r.text, sourceText: src })
+  assert.equal(again.unchanged, true)
 })
 
 test('overwrite：用包内整文件替换', () => {
